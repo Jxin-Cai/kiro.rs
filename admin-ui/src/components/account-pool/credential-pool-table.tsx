@@ -366,7 +366,7 @@ export function CredentialPoolTable({
 
   return (
     <div className="h-full min-h-0 overflow-hidden rounded-lg border bg-card">
-      <div className="h-full overflow-auto">
+      <div className="h-full overflow-auto pb-2">
         <table className="w-full min-w-[1120px] border-collapse text-left">
           <thead className="sticky top-0 z-10 bg-muted text-xs uppercase text-muted-foreground shadow-sm">
             <tr className="border-b">

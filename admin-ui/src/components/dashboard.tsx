@@ -3,7 +3,7 @@ import { RefreshCw, LogOut, Moon, Sun, Server } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { BatchActionBar } from '@/components/account-pool/batch-action-bar'
@@ -943,12 +943,21 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const currentCredentialId = data?.currentId && data.currentId > 0
     ? data.currentId
     : null
+  const currentCredential = currentCredentialId === null
+    ? null
+    : allCredentials.find(credential => credential.id === currentCredentialId) || null
+  const totalCredentialCount = data?.total || 0
+  const availableCredentialCount = data?.available || 0
+  const disabledSummaryCount = Math.max(totalCredentialCount - availableCredentialCount, 0)
+  const availabilityRate = totalCredentialCount > 0
+    ? Math.round((availableCredentialCount / totalCredentialCount) * 100)
+    : 0
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background">
       {/* 顶部导航 */}
       <header className="z-50 w-full shrink-0 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="container flex h-14 items-center justify-between px-4 md:px-8">
+        <div className="flex h-14 w-full items-center justify-between px-4 md:px-6 lg:px-8">
           <div className="flex items-center gap-2">
             <Server className="h-5 w-5" />
             <span className="font-semibold">Kiro Admin</span>
@@ -977,43 +986,49 @@ export function Dashboard({ onLogout }: DashboardProps) {
       </header>
 
       {/* 主内容 */}
-      <main className="container mx-auto flex min-h-0 flex-1 flex-col overflow-hidden px-4 py-6 md:px-8">
+      <main className="flex min-h-0 w-full flex-1 flex-col overflow-hidden px-4 py-5 md:px-6 lg:px-8">
         {/* 统计卡片 */}
-        <div className="mb-6 grid shrink-0 gap-4 md:grid-cols-3">
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                凭据总数
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">{data?.total || 0}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                可用凭据
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold text-green-600">{data?.available || 0}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">
-                当前活跃
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold flex items-center gap-2">
-                {currentCredentialId === null ? '-' : `#${currentCredentialId}`}
+        <Card className="mb-4 shrink-0 rounded-lg shadow-sm">
+          <CardContent className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(150px,190px)_minmax(150px,190px)_minmax(260px,1fr)] md:items-center">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-muted-foreground">凭据总数</div>
+                <div className="mt-1 truncate text-xs text-muted-foreground">
+                  已禁用 {disabledSummaryCount} 个
+                </div>
+              </div>
+              <div className="shrink-0 text-2xl font-semibold tabular-nums">
+                {totalCredentialCount}
+              </div>
+            </div>
+            <div className="flex min-w-0 items-center gap-3 border-t pt-3 md:border-l md:border-t-0 md:pl-4 md:pt-0">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-muted-foreground">可用凭据</div>
+                <div className="mt-1 truncate text-xs text-muted-foreground">
+                  可用率 {availabilityRate}%
+                </div>
+              </div>
+              <div className="shrink-0 text-2xl font-semibold tabular-nums text-green-600">
+                {availableCredentialCount}
+              </div>
+            </div>
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 border-t pt-3 md:border-l md:border-t-0 md:pl-4 md:pt-0">
+              <div className="flex shrink-0 items-center gap-2">
+                <span className="text-sm font-medium text-muted-foreground">当前活跃</span>
+                <span className="text-xl font-semibold tabular-nums">
+                  {currentCredentialId === null ? '-' : `#${currentCredentialId}`}
+                </span>
                 {currentCredentialId !== null && <Badge variant="success">活跃</Badge>}
               </div>
-            </CardContent>
-          </Card>
-        </div>
+              <div
+                className="min-w-0 truncate text-xs text-muted-foreground"
+                title={currentCredential?.email || undefined}
+              >
+                {currentCredential?.email || '未选择当前凭据'}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
 
         {/* 凭据列表 */}
         <div className="flex min-h-0 flex-1 flex-col gap-4">
@@ -1078,7 +1093,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
             />
           )}
 
-          <div className="min-h-0 flex-1">
+          <div className="min-h-0 flex-1 pb-3">
             {allCredentials.length === 0 ? (
             <Card className="h-full">
               <CardContent className="py-8 text-center text-muted-foreground">

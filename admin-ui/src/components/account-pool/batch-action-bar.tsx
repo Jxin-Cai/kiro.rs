@@ -2,10 +2,10 @@ import {
   CheckCircle2,
   Power,
   PowerOff,
+  Download,
   RefreshCw,
   RotateCcw,
   Trash2,
-  Upload,
   X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -143,7 +143,7 @@ export function BatchActionBar({
             disabled={batchBusy || selectedCount === 0}
             title="导出选中账号为一个 JSON 文件"
           >
-            <Upload className="h-4 w-4" />
+            <Download className="h-4 w-4" />
             导出
           </Button>
           <Button

@@ -1,13 +1,13 @@
 import {
   CheckCircle2,
   ChevronDown,
-  Download,
-  FileDown,
+  FileUp,
   MoreHorizontal,
   Plus,
   RefreshCw,
   Search,
   Trash2,
+  Upload,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -193,18 +193,18 @@ export function PoolToolbar({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button size="sm" variant="outline">
-                  <Download className="h-4 w-4" />
+                  <Upload className="h-4 w-4" />
                   导入
                   <ChevronDown className="h-4 w-4" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem onClick={onOpenKamImport}>
-                  <FileDown className="h-4 w-4" />
+                  <FileUp className="h-4 w-4" />
                   Kiro Account Manager 导入
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={onOpenBatchImport}>
-                  <Download className="h-4 w-4" />
+                  <Upload className="h-4 w-4" />
                   批量 JSON 导入
                 </DropdownMenuItem>
               </DropdownMenuContent>

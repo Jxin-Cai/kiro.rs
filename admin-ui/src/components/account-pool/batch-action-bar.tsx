@@ -73,12 +73,12 @@ export function BatchActionBar({
   const isEnabling = batchTogglingDisabled && batchToggleAction === 'enable'
 
   return (
-    <div className="sticky top-16 z-30 rounded-lg border bg-card/95 p-3 shadow-sm backdrop-blur">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="text-sm font-medium">
+    <div className="sticky top-16 z-30 max-w-full overflow-hidden rounded-lg border bg-card/95 p-3 shadow-sm backdrop-blur">
+      <div className="flex min-w-0 flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+        <div className="min-w-0 shrink-0 truncate text-sm font-medium">
           已选择 {selectedCount} 个账号
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2 xl:justify-end">
           <Button
             size="sm"
             variant="outline"

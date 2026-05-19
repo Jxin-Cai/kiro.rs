@@ -174,7 +174,7 @@ function CredentialRow({
         <td className="w-10 px-4 py-3 align-middle">
           <Checkbox checked={selected} onCheckedChange={onToggleSelect} />
         </td>
-        <td className="min-w-[280px] max-w-[360px] px-3 py-3 align-middle">
+        <td className="px-3 py-3 align-middle">
           <div className="flex min-w-0 flex-col gap-1">
             <div
               className="truncate text-sm font-medium text-foreground"
@@ -365,9 +365,21 @@ export function CredentialPoolTable({
     credentials.every(credential => selectedIds.has(credential.id))
 
   return (
-    <div className="h-full min-h-0 overflow-hidden rounded-lg border bg-card">
-      <div className="h-full overflow-auto pb-2">
-        <table className="w-full min-w-[1120px] border-collapse text-left">
+    <div className="h-full min-h-0 min-w-0 max-w-full overflow-hidden rounded-lg border bg-card">
+      <div className="h-full max-w-full overflow-auto pb-2">
+        <table className="w-full min-w-[1200px] table-fixed border-collapse text-left">
+          <colgroup>
+            <col className="w-11" />
+            <col className="w-72" />
+            <col className="w-24" />
+            <col className="w-32" />
+            <col className="w-20" />
+            <col className="w-32" />
+            <col className="w-32" />
+            <col className="w-28" />
+            <col className="w-20" />
+            <col className="w-28" />
+          </colgroup>
           <thead className="sticky top-0 z-10 bg-muted text-xs uppercase text-muted-foreground shadow-sm">
             <tr className="border-b">
               <th className="w-10 px-4 py-3">

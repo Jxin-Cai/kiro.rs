@@ -108,12 +108,12 @@ function SelectControl<T extends string>({
   label: string
 }) {
   return (
-    <label className="min-w-0 max-w-full">
+    <label className="min-w-0 max-w-full shrink-0">
       <span className="sr-only">{label}</span>
       <select
         value={value}
         onChange={(event) => onChange(event.target.value as T)}
-        className="h-9 w-full max-w-[14rem] truncate rounded-md border border-input bg-background px-3 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        className="h-9 w-full max-w-[12rem] truncate rounded-md border border-input bg-background px-3 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
       >
         {options.map(option => (
           <option key={option.value} value={option.value}>
@@ -162,17 +162,17 @@ export function PoolToolbar({
   ]
 
   return (
-    <div className="rounded-lg border bg-card p-4 shadow-sm">
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="min-w-0">
+    <div className="max-w-full overflow-hidden rounded-lg border bg-card p-4 shadow-sm">
+      <div className="flex min-w-0 flex-col gap-4">
+        <div className="flex min-w-0 flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="min-w-0 shrink-0">
             <h2 className="text-xl font-semibold">凭据管理</h2>
             <p className="text-sm text-muted-foreground">
               显示 {filteredCount} / {totalCount} 个凭据
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2 xl:justify-end">
             {verifying && !verifyDialogOpen && (
               <Button onClick={onOpenVerifyDialog} size="sm" variant="secondary">
                 <CheckCircle2 className="h-4 w-4 animate-spin" />
@@ -234,8 +234,8 @@ export function PoolToolbar({
           </div>
         </div>
 
-        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-          <div className="relative min-w-0 flex-1 xl:max-w-md">
+        <div className="flex min-w-0 flex-col gap-3 2xl:flex-row 2xl:items-center 2xl:justify-between">
+          <div className="relative min-w-0 flex-1 2xl:max-w-md">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               value={searchQuery}
@@ -245,7 +245,7 @@ export function PoolToolbar({
             />
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2 2xl:justify-end">
             <SelectControl
               label="状态筛选"
               value={statusFilter}
@@ -279,7 +279,7 @@ export function PoolToolbar({
                 { value: 'desc', label: '降序' },
               ]}
             />
-            <label>
+            <label className="shrink-0">
               <span className="sr-only">每页数量</span>
               <select
                 value={pageSize}

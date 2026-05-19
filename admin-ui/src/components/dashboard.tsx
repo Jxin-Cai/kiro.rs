@@ -954,15 +954,15 @@ export function Dashboard({ onLogout }: DashboardProps) {
     : 0
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-background">
+    <div className="flex h-screen min-w-0 flex-col overflow-hidden bg-background">
       {/* 顶部导航 */}
       <header className="z-50 w-full shrink-0 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="flex h-14 w-full items-center justify-between px-4 md:px-6 lg:px-8">
-          <div className="flex items-center gap-2">
+        <div className="flex h-14 w-full min-w-0 items-center justify-between px-4 md:px-6 lg:px-8">
+          <div className="flex min-w-0 items-center gap-2">
             <Server className="h-5 w-5" />
-            <span className="font-semibold">Kiro Admin</span>
+            <span className="truncate font-semibold">Kiro Admin</span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             <Button
               variant="outline"
               size="sm"
@@ -986,52 +986,62 @@ export function Dashboard({ onLogout }: DashboardProps) {
       </header>
 
       {/* 主内容 */}
-      <main className="flex min-h-0 w-full flex-1 flex-col overflow-hidden px-4 py-5 md:px-6 lg:px-8">
+      <main className="flex min-h-0 min-w-0 w-full max-w-full flex-1 flex-col overflow-hidden px-4 py-5 md:px-6 lg:px-8">
         {/* 统计卡片 */}
-        <Card className="mb-4 shrink-0 rounded-lg shadow-sm">
-          <CardContent className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(150px,190px)_minmax(150px,190px)_minmax(260px,1fr)] md:items-center">
-            <div className="flex min-w-0 items-center gap-3">
-              <div className="min-w-0">
-                <div className="text-sm font-medium text-muted-foreground">凭据总数</div>
-                <div className="mt-1 truncate text-xs text-muted-foreground">
-                  已禁用 {disabledSummaryCount} 个
-                </div>
+        <Card className="mb-4 max-w-full shrink-0 overflow-hidden rounded-lg shadow-sm">
+          <CardContent className="grid min-w-0 gap-0 p-0 md:grid-cols-3">
+            <div className="flex min-h-20 min-w-0 flex-col items-center justify-center px-4 py-3 text-center">
+              <div className="flex max-w-full min-w-0 items-baseline justify-center gap-3">
+                <span className="min-w-0 truncate text-sm font-medium text-muted-foreground">
+                  凭据总数
+                </span>
+                <span className="shrink-0 text-2xl font-semibold tabular-nums">
+                  {totalCredentialCount}
+                </span>
               </div>
-              <div className="shrink-0 text-2xl font-semibold tabular-nums">
-                {totalCredentialCount}
-              </div>
-            </div>
-            <div className="flex min-w-0 items-center gap-3 border-t pt-3 md:border-l md:border-t-0 md:pl-4 md:pt-0">
-              <div className="min-w-0">
-                <div className="text-sm font-medium text-muted-foreground">可用凭据</div>
-                <div className="mt-1 truncate text-xs text-muted-foreground">
-                  可用率 {availabilityRate}%
-                </div>
-              </div>
-              <div className="shrink-0 text-2xl font-semibold tabular-nums text-green-600">
-                {availableCredentialCount}
+              <div className="mt-1 w-full truncate text-xs text-muted-foreground">
+                已禁用 {disabledSummaryCount} 个
               </div>
             </div>
-            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 border-t pt-3 md:border-l md:border-t-0 md:pl-4 md:pt-0">
-              <div className="flex shrink-0 items-center gap-2">
-                <span className="text-sm font-medium text-muted-foreground">当前活跃</span>
-                <span className="text-xl font-semibold tabular-nums">
+            <div className="flex min-h-20 min-w-0 flex-col items-center justify-center border-t px-4 py-3 text-center md:border-l md:border-t-0">
+              <div className="flex max-w-full min-w-0 items-center justify-center gap-2">
+                <span className="min-w-0 truncate text-sm font-medium text-muted-foreground">
+                  当前活跃
+                </span>
+                <span className="shrink-0 text-2xl font-semibold tabular-nums">
                   {currentCredentialId === null ? '-' : `#${currentCredentialId}`}
                 </span>
-                {currentCredentialId !== null && <Badge variant="success">活跃</Badge>}
+                {currentCredentialId !== null && (
+                  <Badge variant="success" className="shrink-0">
+                    活跃
+                  </Badge>
+                )}
               </div>
               <div
-                className="min-w-0 truncate text-xs text-muted-foreground"
+                className="mt-1 block w-full max-w-full truncate px-2 text-xs text-muted-foreground"
                 title={currentCredential?.email || undefined}
               >
                 {currentCredential?.email || '未选择当前凭据'}
+              </div>
+            </div>
+            <div className="flex min-h-20 min-w-0 flex-col items-center justify-center border-t px-4 py-3 text-center md:border-l md:border-t-0">
+              <div className="flex max-w-full min-w-0 items-baseline justify-center gap-3">
+                <span className="min-w-0 truncate text-sm font-medium text-muted-foreground">
+                  可用凭据
+                </span>
+                <span className="shrink-0 text-2xl font-semibold tabular-nums text-green-600">
+                  {availableCredentialCount}
+                </span>
+              </div>
+              <div className="mt-1 w-full truncate text-xs text-muted-foreground">
+                可用率 {availabilityRate}%
               </div>
             </div>
           </CardContent>
         </Card>
 
         {/* 凭据列表 */}
-        <div className="flex min-h-0 flex-1 flex-col gap-4">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-4">
           <PoolToolbar
             totalCount={allCredentials.length}
             filteredCount={filteredCredentials.length}
@@ -1093,7 +1103,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
             />
           )}
 
-          <div className="min-h-0 flex-1 pb-3">
+          <div className="min-h-0 min-w-0 flex-1 pb-3">
             {allCredentials.length === 0 ? (
             <Card className="h-full">
               <CardContent className="py-8 text-center text-muted-foreground">
@@ -1107,8 +1117,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
               </CardContent>
             </Card>
           ) : (
-            <div className="flex h-full min-h-0 flex-col gap-4">
-              <div className="hidden min-h-0 flex-1 md:block">
+            <div className="flex h-full min-h-0 min-w-0 flex-col gap-4">
+              <div className="hidden min-h-0 min-w-0 flex-1 xl:block">
                 <CredentialPoolTable
                   credentials={currentCredentials}
                   selectedIds={selectedIds}
@@ -1121,7 +1131,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 />
               </div>
 
-              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 md:hidden">
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 xl:hidden">
                 {currentCredentials.map((credential) => (
                   <CredentialCompactCard
                     key={credential.id}

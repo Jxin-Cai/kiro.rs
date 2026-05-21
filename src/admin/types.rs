@@ -103,6 +103,10 @@ pub struct AddCredentialRequest {
     #[serde(default)]
     pub priority: u32,
 
+    /// 是否创建后保持禁用（可选，默认 false）
+    #[serde(default)]
+    pub disabled: bool,
+
     /// 凭据级 Region 配置（用于 OIDC token 刷新）
     /// 未配置时回退到 config.json 的全局 region
     pub region: Option<String>,

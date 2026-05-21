@@ -1730,8 +1730,8 @@ impl MultiTokenManager {
             }
         }
 
-        // 3. 验证凭据有效性（API Key 无需网络刷新）
-        let mut validated_cred = if new_cred.is_api_key_credential() {
+        // 3. 验证凭据有效性（API Key 和禁用导入无需马上触发上游刷新）
+        let mut validated_cred = if new_cred.is_api_key_credential() || new_cred.disabled {
             new_cred.clone()
         } else {
             let effective_proxy = new_cred.effective_proxy(self.proxy.as_ref());
@@ -1764,7 +1764,9 @@ impl MultiTokenManager {
         validated_cred.proxy_url = new_cred.proxy_url;
         validated_cred.proxy_username = new_cred.proxy_username;
         validated_cred.proxy_password = new_cred.proxy_password;
+        validated_cred.disabled = new_cred.disabled;
         validated_cred.kiro_api_key = new_cred.kiro_api_key;
+        let disabled = validated_cred.disabled;
 
         {
             let mut entries = self.entries.lock();
@@ -1773,8 +1775,12 @@ impl MultiTokenManager {
                 credentials: validated_cred,
                 failure_count: 0,
                 refresh_failure_count: 0,
-                disabled: false,
-                disabled_reason: None,
+                disabled,
+                disabled_reason: if disabled {
+                    Some(DisabledReason::Manual)
+                } else {
+                    None
+                },
                 success_count: 0,
                 last_used_at: None,
             });

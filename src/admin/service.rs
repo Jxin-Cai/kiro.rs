@@ -137,6 +137,7 @@ impl AdminService {
                     client_id: credential.client_id,
                     client_secret: credential.client_secret,
                     priority: credential.priority,
+                    disabled: credential.disabled,
                     region: credential.region,
                     auth_region: credential.auth_region,
                     api_region: credential.api_region,

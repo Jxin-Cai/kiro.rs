@@ -35,16 +35,22 @@ pub fn canonicalize_model_id(model: &str) -> Option<String> {
     if model_lower.contains("sonnet") {
         if model_lower.contains("4-6") || model_lower.contains("4.6") {
             Some("claude-sonnet-4.6".to_string())
-        } else {
+        } else if model_lower.contains("4-5") || model_lower.contains("4.5") {
             Some("claude-sonnet-4.5".to_string())
+        } else {
+            None
         }
     } else if model_lower.contains("opus") {
-        if model_lower.contains("4-7") || model_lower.contains("4.7") {
+        if model_lower.contains("4-8") || model_lower.contains("4.8") {
+            Some("claude-opus-4.8".to_string())
+        } else if model_lower.contains("4-7") || model_lower.contains("4.7") {
             Some("claude-opus-4.7".to_string())
+        } else if model_lower.contains("4-6") || model_lower.contains("4.6") {
+            Some("claude-opus-4.6".to_string())
         } else if model_lower.contains("4-5") || model_lower.contains("4.5") {
             Some("claude-opus-4.5".to_string())
         } else {
-            Some("claude-opus-4.6".to_string())
+            None
         }
     } else if model_lower.contains("haiku") {
         Some("claude-haiku-4.5".to_string())
@@ -67,6 +73,7 @@ pub fn canonicalize_model_list(models: &[String]) -> Result<Vec<String>, String>
 /// canonical 模型 ID 的展示名称。
 pub fn display_name_for_canonical_model(id: &str) -> String {
     match id {
+        "claude-opus-4.8" => "Claude Opus 4.8".to_string(),
         "claude-opus-4.7" => "Claude Opus 4.7".to_string(),
         "claude-opus-4.6" => "Claude Opus 4.6".to_string(),
         "claude-opus-4.5" => "Claude Opus 4.5".to_string(),

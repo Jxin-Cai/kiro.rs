@@ -1,0 +1,19 @@
+{
+  "host": "0.0.0.0",
+  "port": 8990,
+  "region": "us-east-1",
+  "kiroVersion": "0.11.107",
+  "machineId": null,
+  "apiKey": "sk-caijiaxin123",
+  "systemVersion": "win32#10.0.22631",
+  "nodeVersion": "22.22.0",
+  "tlsBackend": "rustls",
+  "countTokensApiUrl": null,
+  "countTokensApiKey": null,
+  "countTokensAuthType": "x-api-key",
+  "proxyUrl": null,
+  "proxyUsername": null,
+  "proxyPassword": null,
+  "adminApiKey": "sk-caijiaxin123",
+  "loadBalancingMode": "priority"
+}

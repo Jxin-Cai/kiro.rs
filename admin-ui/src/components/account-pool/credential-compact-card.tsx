@@ -6,6 +6,7 @@ import {
   Loader2,
   MoreHorizontal,
   RefreshCw,
+  SlidersHorizontal,
   RotateCcw,
   Trash2,
   Wallet,
@@ -29,6 +30,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Switch } from '@/components/ui/switch'
+import { formatSupportedModels } from '@/components/account-pool/credential-models-dialog'
 import { StatusBadge } from '@/components/account-pool/status-badge'
 import {
   useDeleteCredential,
@@ -61,6 +63,7 @@ interface CredentialCompactCardProps {
   onToggleSelect: () => void
   onOpenDetails: (id: number) => void
   onViewBalance: (id: number) => void
+  onOpenModels: (id: number) => void
 }
 
 export function CredentialCompactCard({
@@ -71,6 +74,7 @@ export function CredentialCompactCard({
   onToggleSelect,
   onOpenDetails,
   onViewBalance,
+  onOpenModels,
 }: CredentialCompactCardProps) {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const setDisabled = useSetDisabled()
@@ -144,8 +148,8 @@ export function CredentialCompactCard({
 
   return (
     <>
-      <div className="rounded-lg border bg-card p-4 shadow-sm">
-        <div className="flex items-start gap-3">
+      <div className="rounded-lg border bg-card px-3 py-2 shadow-sm">
+        <div className="flex items-center gap-3">
           <Checkbox checked={selected} onCheckedChange={onToggleSelect} />
           <div className="min-w-0 flex-1 space-y-3">
             <div className="flex min-w-0 items-start justify-between gap-3">
@@ -155,6 +159,9 @@ export function CredentialCompactCard({
                 </div>
                 <div className="truncate text-xs text-muted-foreground" title={getCredentialSecondaryText(credential)}>
                   {getCredentialSecondaryText(credential)}
+                </div>
+                <div className="truncate text-xs text-muted-foreground" title={(credential.supportedModels || []).join(', ') || '全部模型'}>
+                  模型：{formatSupportedModels(credential.supportedModels)}
                 </div>
               </div>
               <StatusBadge health={health} />
@@ -209,6 +216,15 @@ export function CredentialCompactCard({
                 >
                   <Info className="h-4 w-4" />
                   <span className="sr-only">详情</span>
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 px-2"
+                  onClick={() => onOpenModels(credential.id)}
+                >
+                  <SlidersHorizontal className="h-4 w-4" />
+                  <span className="sr-only">模型</span>
                 </Button>
                 <Button
                   size="sm"

@@ -286,9 +286,9 @@ export function PoolToolbar({
                 onChange={(event) => onPageSizeChange(Number(event.target.value))}
                 className="h-9 rounded-md border border-input bg-background px-3 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               >
-                <option value={12}>每页 12</option>
-                <option value={24}>每页 24</option>
-                <option value={48}>每页 48</option>
+                <option value={50}>每页 50</option>
+                <option value={100}>每页 100</option>
+                <option value={200}>每页 200</option>
               </select>
             </label>
           </div>

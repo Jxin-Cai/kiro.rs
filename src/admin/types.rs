@@ -4,6 +4,46 @@ use serde::{Deserialize, Serialize};
 
 // ============ 凭据状态 ============
 
+/// 凭据分页查询参数
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialsQuery {
+    #[serde(default = "default_page")]
+    pub page: usize,
+    #[serde(default = "default_page_size")]
+    pub page_size: usize,
+    #[serde(default)]
+    pub search: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub auth_method: Option<String>,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub sort_key: Option<String>,
+    #[serde(default)]
+    pub sort_direction: Option<String>,
+}
+
+fn default_page() -> usize {
+    1
+}
+
+fn default_page_size() -> usize {
+    50
+}
+
+/// 凭据分页信息
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialsPagination {
+    pub page: usize,
+    pub page_size: usize,
+    pub total_items: usize,
+    pub total_pages: usize,
+}
+
 /// 所有凭据状态响应
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +56,8 @@ pub struct CredentialsStatusResponse {
     pub current_id: u64,
     /// 各凭据状态列表
     pub credentials: Vec<CredentialStatusItem>,
+    /// 分页信息
+    pub pagination: CredentialsPagination,
 }
 
 /// 单个凭据的状态信息
@@ -62,6 +104,8 @@ pub struct CredentialStatusItem {
     pub disabled_reason: Option<String>,
     /// 端点名称（决定该凭据走哪套 Kiro API，已回退到默认端点）
     pub endpoint: String,
+    /// 账号允许路由的模型列表，空列表表示不限制
+    pub supported_models: Vec<String>,
 }
 
 // ============ 操作请求 ============
@@ -141,6 +185,11 @@ pub struct AddCredentialRequest {
     /// 端点名称（可选，未配置时使用 config.defaultEndpoint）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+
+    /// 账号允许路由的模型列表，空列表表示不限制
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub supported_models: Vec<String>,
 }
 
 fn default_auth_method() -> String {
@@ -153,6 +202,36 @@ fn default_auth_method() -> String {
 pub struct ExportCredentialsRequest {
     /// 要导出的凭据 ID 列表
     pub ids: Vec<u64>,
+}
+
+/// 设置凭据可用模型请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSupportedModelsRequest {
+    /// canonical 或 API 模型 ID；空列表表示不限制
+    pub models: Vec<String>,
+}
+
+/// 单个模型选项
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialModelOption {
+    pub id: String,
+    pub display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_id: Option<String>,
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// 凭据可用模型响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialModelsResponse {
+    pub credential_id: u64,
+    pub selected_models: Vec<String>,
+    pub models: Vec<CredentialModelOption>,
 }
 
 /// 添加凭据成功响应

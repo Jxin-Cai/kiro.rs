@@ -18,9 +18,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::http_client::{ProxyConfig, build_client};
-use crate::kiro::endpoint::{EndpointRegistry, KiroEndpoint, RequestContext};
+use crate::kiro::endpoint::{EndpointRegistry, KiroEndpoint, KiroRequest, RequestContext, extract_next_token};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
+use crate::kiro::model::model_catalog::{ModelOption, canonicalize_model_list, model_options_from_upstream_value};
 use crate::kiro::model::token_refresh::{
     IdcRefreshRequest, IdcRefreshResponse, RefreshRequest, RefreshResponse,
 };
@@ -481,6 +482,8 @@ pub struct CredentialEntrySnapshot {
     /// 端点名称（未显式配置时返回 None，由 Admin 层回退到默认值）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    /// 账号允许路由的模型列表，空列表表示不限制
+    pub supported_models: Vec<String>,
 }
 
 /// 凭据管理器状态快照
@@ -609,6 +612,7 @@ impl MultiTokenManager {
             .into_iter()
             .map(|mut cred| {
                 cred.canonicalize_auth_method();
+                cred.canonicalize_supported_models();
                 let id = cred.id.unwrap_or_else(|| {
                     let id = next_id;
                     next_id += 1;
@@ -733,24 +737,10 @@ impl MultiTokenManager {
     fn select_next_credential(&self, model: Option<&str>) -> Option<(u64, KiroCredentials)> {
         let entries = self.entries.lock();
 
-        // 检查是否是 opus 模型
-        let is_opus = model
-            .map(|m| m.to_lowercase().contains("opus"))
-            .unwrap_or(false);
-
-        // 过滤可用凭据
+        // 过滤可用且支持请求模型的凭据
         let available: Vec<_> = entries
             .iter()
-            .filter(|e| {
-                if e.disabled {
-                    return false;
-                }
-                // 如果是 opus 模型，需要检查订阅等级
-                if is_opus && !e.credentials.supports_opus() {
-                    return false;
-                }
-                true
-            })
+            .filter(|e| !e.disabled && e.credentials.supports_model(model))
             .collect();
 
         if available.is_empty() {
@@ -814,7 +804,7 @@ impl MultiTokenManager {
                     let current_id = *self.current_id.lock();
                     entries
                         .iter()
-                        .find(|e| e.id == current_id && !e.disabled)
+                        .find(|e| e.id == current_id && !e.disabled && e.credentials.supports_model(model))
                         .map(|e| (e.id, e.credentials.clone()))
                 };
 
@@ -856,6 +846,14 @@ impl MultiTokenManager {
                         // 因为 available_count() 会尝试获取 entries 锁，
                         // 而此时我们已经持有该锁，会导致死锁
                         let available = entries.iter().filter(|e| !e.disabled).count();
+                        let model_supported = entries
+                            .iter()
+                            .filter(|e| !e.disabled && e.credentials.supports_model(model))
+                            .count();
+                        if available > 0 && model_supported == 0 {
+                            let model_label = model.unwrap_or("未知模型");
+                            anyhow::bail!("没有可用于模型 {} 的凭据（可用账号: {}/{}）", model_label, available, total);
+                        }
                         anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
                     }
                 }
@@ -1038,6 +1036,7 @@ impl MultiTokenManager {
                 .map(|e| {
                     let mut cred = e.credentials.clone();
                     cred.canonicalize_auth_method();
+                    cred.canonicalize_supported_models();
                     // 同步 disabled 状态到凭据对象
                     cred.disabled = e.disabled;
                     cred
@@ -1497,6 +1496,7 @@ impl MultiTokenManager {
                         .to_string()
                     }),
                     endpoint: e.credentials.endpoint.clone(),
+                    supported_models: e.credentials.supported_models.clone(),
                 })
                 .collect(),
             current_id,
@@ -1601,6 +1601,31 @@ impl MultiTokenManager {
         Ok(())
     }
 
+    /// 设置指定凭据的可用模型列表（Admin API）
+    pub fn set_supported_models(&self, id: u64, models: Vec<String>) -> anyhow::Result<Vec<String>> {
+        let models = canonicalize_model_list(&models).map_err(|e| anyhow::anyhow!(e))?;
+        {
+            let mut entries = self.entries.lock();
+            let entry = entries
+                .iter_mut()
+                .find(|e| e.id == id)
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+            entry.credentials.supported_models = models.clone();
+        }
+        self.persist_credentials()?;
+        Ok(models)
+    }
+
+    /// 获取指定凭据当前配置的可用模型列表（Admin API）
+    pub fn get_supported_models(&self, id: u64) -> anyhow::Result<Vec<String>> {
+        let entries = self.entries.lock();
+        let entry = entries
+            .iter()
+            .find(|e| e.id == id)
+            .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+        Ok(entry.credentials.supported_models.clone())
+    }
+
     /// 获取指定凭据的使用额度（Admin API）
     pub async fn get_usage_limits_for(&self, id: u64) -> anyhow::Result<UsageLimitsResponse> {
         let credentials = {
@@ -1656,6 +1681,50 @@ impl MultiTokenManager {
         }
 
         Ok(usage_limits)
+    }
+
+    /// 使用指定凭据从真实上游查询可用模型列表（Admin API）
+    pub async fn list_available_models_for(&self, id: u64) -> anyhow::Result<Vec<ModelOption>> {
+        let credentials = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.credentials.clone())
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+        };
+
+        let ctx = self.try_ensure_token(id, &credentials).await?;
+        let effective_proxy = ctx.credentials().effective_proxy(self.proxy.as_ref());
+        let client = build_client(effective_proxy.as_ref(), 60, self.config.tls_backend)?;
+        let endpoint = ctx.endpoint();
+        let rctx = ctx.to_request_context(&self.config);
+        let mut all_options = Vec::new();
+        let mut next_token: Option<String> = None;
+
+        loop {
+            let req = KiroRequest::ListAvailableModels {
+                next_token: next_token.as_deref(),
+            };
+            let response = endpoint.build_request(&client, &rctx, &req)?.send().await?;
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            if !status.is_success() {
+                anyhow::bail!("ListAvailableModels failed: {} {}", status, body);
+            }
+            let value: serde_json::Value = serde_json::from_str(&body)?;
+            all_options.extend(model_options_from_upstream_value(&value));
+            next_token = extract_next_token(&value);
+            if next_token.is_none() {
+                break;
+            }
+        }
+
+        let mut dedup = std::collections::BTreeMap::new();
+        for option in all_options {
+            dedup.entry(option.id.clone()).or_insert(option);
+        }
+        Ok(dedup.into_values().collect())
     }
 
     /// 添加新凭据（Admin API）
@@ -1766,6 +1835,8 @@ impl MultiTokenManager {
         validated_cred.proxy_password = new_cred.proxy_password;
         validated_cred.disabled = new_cred.disabled;
         validated_cred.kiro_api_key = new_cred.kiro_api_key;
+        validated_cred.supported_models = canonicalize_model_list(&new_cred.supported_models)
+            .map_err(|e| anyhow::anyhow!(e))?;
         let disabled = validated_cred.disabled;
 
         {

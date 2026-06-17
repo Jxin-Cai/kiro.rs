@@ -1,7 +1,7 @@
 /target
 /CLAUDE.md
 /AGENTS.md
-/config.json
+/config/config.json
 /credentials.json
 /.idea
 /test.json

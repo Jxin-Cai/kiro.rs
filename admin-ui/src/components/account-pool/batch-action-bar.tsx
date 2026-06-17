@@ -3,6 +3,7 @@ import {
   Power,
   PowerOff,
   Download,
+  FileJson,
   RefreshCw,
   RotateCcw,
   Trash2,
@@ -34,6 +35,7 @@ interface BatchActionBarProps {
   onBatchSetDisabled: (disabled: boolean) => void
   onBatchDelete: () => void
   onExportSelected: () => void
+  onExportKamSelected: () => void
   onDeselectAll: () => void
 }
 
@@ -61,6 +63,7 @@ export function BatchActionBar({
   onBatchSetDisabled,
   onBatchDelete,
   onExportSelected,
+  onExportKamSelected,
   onDeselectAll,
 }: BatchActionBarProps) {
   const batchBusy =
@@ -144,7 +147,17 @@ export function BatchActionBar({
             title="导出选中账号为一个 JSON 文件"
           >
             <Download className="h-4 w-4" />
-            导出
+            导出 JSON
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={onExportKamSelected}
+            disabled={batchBusy || selectedCount === 0}
+            title="导出选中的 OAuth/IdC 账号为 KAM accounts list"
+          >
+            <FileJson className="h-4 w-4" />
+            导出 KAM
           </Button>
           <Button
             size="sm"

@@ -67,6 +67,22 @@ impl IdeEndpoint {
         url
     }
 
+    fn list_available_models_url(
+        &self,
+        ctx: &RequestContext<'_>,
+        next_token: Option<&str>,
+    ) -> String {
+        let host = self.host(ctx);
+        let mut url = format!("https://{}/ListAvailableModels?origin=AI_EDITOR&maxResults=50", host);
+        if let Some(profile_arn) = &ctx.credentials.profile_arn {
+            url.push_str(&format!("&profileArn={}", urlencoding::encode(profile_arn)));
+        }
+        if let Some(next_token) = next_token {
+            url.push_str(&format!("&nextToken={}", urlencoding::encode(next_token)));
+        }
+        url
+    }
+
     fn usage_limits_x_amz_user_agent(&self, ctx: &RequestContext<'_>) -> String {
         // 历史 get_usage_limits 使用 aws-sdk-js/1.0.0（区别于 API/MCP 的 1.0.34）
         format!(
@@ -155,6 +171,25 @@ impl KiroEndpoint for IdeEndpoint {
                     .header("amz-sdk-request", "attempt=1; max=1")
                     .header("Authorization", format!("Bearer {}", ctx.token))
                     .header("Connection", "close");
+                if ctx.credentials.is_api_key_credential() {
+                    builder = builder.header("tokentype", "API_KEY");
+                }
+                Ok(builder)
+            }
+            KiroRequest::ListAvailableModels { next_token } => {
+                let url = self.list_available_models_url(ctx, *next_token);
+                let mut builder = client
+                    .get(&url)
+                    .header("Accept", "application/json")
+                    .header("content-type", "application/json")
+                    .header("Connection", "close")
+                    .header("x-amzn-codewhisperer-optout", "true")
+                    .header("x-amz-user-agent", self.x_amz_user_agent(ctx))
+                    .header("user-agent", self.user_agent(ctx))
+                    .header("host", self.host(ctx))
+                    .header("amz-sdk-invocation-id", Uuid::new_v4().to_string())
+                    .header("amz-sdk-request", "attempt=1; max=1")
+                    .header("Authorization", format!("Bearer {}", ctx.token));
                 if ctx.credentials.is_api_key_credential() {
                     builder = builder.header("tokentype", "API_KEY");
                 }

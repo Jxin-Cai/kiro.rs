@@ -14,8 +14,10 @@ use crate::kiro::token_manager::MultiTokenManager;
 
 use super::error::AdminServiceError;
 use super::types::{
-    AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
+    AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialModelOption,
+    CredentialModelsResponse, CredentialStatusItem, CredentialsPagination, CredentialsQuery,
     CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
+    SetSupportedModelsRequest, SuccessResponse,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -61,7 +63,10 @@ impl AdminService {
     }
 
     /// 获取所有凭据状态
-    pub fn get_all_credentials(&self) -> CredentialsStatusResponse {
+    pub fn get_all_credentials(
+        &self,
+        query: CredentialsQuery,
+    ) -> Result<CredentialsStatusResponse, AdminServiceError> {
         let snapshot = self.token_manager.snapshot();
         let default_endpoint = self.token_manager.config().default_endpoint.clone();
 
@@ -88,18 +93,88 @@ impl AdminService {
                 refresh_failure_count: entry.refresh_failure_count,
                 disabled_reason: entry.disabled_reason,
                 endpoint: entry.endpoint.unwrap_or_else(|| default_endpoint.clone()),
+                supported_models: entry.supported_models,
             })
             .collect();
 
-        // 按优先级排序（数字越小优先级越高）
-        credentials.sort_by_key(|c| c.priority);
+        let page_size = match query.page_size {
+            50 | 100 | 200 => query.page_size,
+            other => {
+                return Err(AdminServiceError::InvalidCredential(format!(
+                    "pageSize 必须是 50、100 或 200（当前: {}）",
+                    other
+                )));
+            }
+        };
+        let page = query.page.max(1);
 
-        CredentialsStatusResponse {
+        if let Some(search) = query.search.as_ref().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()) {
+            credentials.retain(|c| {
+                c.id.to_string().contains(&search)
+                    || c.email.as_deref().unwrap_or_default().to_lowercase().contains(&search)
+                    || c.masked_api_key.as_deref().unwrap_or_default().to_lowercase().contains(&search)
+                    || c.refresh_token_hash.as_deref().unwrap_or_default().to_lowercase().contains(&search)
+                    || c.api_key_hash.as_deref().unwrap_or_default().to_lowercase().contains(&search)
+                    || c.endpoint.to_lowercase().contains(&search)
+            });
+        }
+
+        if let Some(status) = query.status.as_deref().filter(|s| *s != "all") {
+            credentials.retain(|c| match status {
+                "available" => !c.disabled,
+                "current" => c.is_current,
+                "problem" => c.failure_count > 0 || c.refresh_failure_count > 0 || c.disabled_reason.is_some(),
+                "disabled" => c.disabled,
+                _ => true,
+            });
+        }
+
+        if let Some(auth_method) = query.auth_method.as_deref().filter(|s| *s != "all") {
+            credentials.retain(|c| c.auth_method.as_deref() == Some(auth_method));
+        }
+
+        if let Some(endpoint) = query.endpoint.as_deref().filter(|s| *s != "all") {
+            credentials.retain(|c| c.endpoint == endpoint);
+        }
+
+        let sort_key = query.sort_key.as_deref().unwrap_or("priority");
+        credentials.sort_by(|a, b| {
+            let ord = match sort_key {
+                "status" => a.disabled.cmp(&b.disabled).then(a.failure_count.cmp(&b.failure_count)),
+                "email" => a.email.cmp(&b.email).then(a.id.cmp(&b.id)),
+                "failures" => (a.failure_count + a.refresh_failure_count)
+                    .cmp(&(b.failure_count + b.refresh_failure_count))
+                    .then(a.id.cmp(&b.id)),
+                "success" => a.success_count.cmp(&b.success_count).then(a.id.cmp(&b.id)),
+                "lastUsed" => a.last_used_at.cmp(&b.last_used_at).then(a.id.cmp(&b.id)),
+                "id" => a.id.cmp(&b.id),
+                _ => a.priority.cmp(&b.priority).then(a.id.cmp(&b.id)),
+            };
+            if query.sort_direction.as_deref() == Some("desc") {
+                ord.reverse()
+            } else {
+                ord
+            }
+        });
+
+        let total_items = credentials.len();
+        let total_pages = total_items.div_ceil(page_size).max(1);
+        let page = page.min(total_pages);
+        let start = (page - 1) * page_size;
+        let credentials = credentials.into_iter().skip(start).take(page_size).collect();
+
+        Ok(CredentialsStatusResponse {
             total: snapshot.total,
             available: snapshot.available,
             current_id: snapshot.current_id,
             credentials,
-        }
+            pagination: CredentialsPagination {
+                page,
+                page_size,
+                total_items,
+                total_pages,
+            },
+        })
     }
 
     /// 导出指定凭据为批量导入兼容格式
@@ -148,6 +223,7 @@ impl AdminService {
                     proxy_password: credential.proxy_password,
                     kiro_api_key: credential.kiro_api_key,
                     endpoint: credential.endpoint,
+                    supported_models: credential.supported_models,
                 }
             })
             .collect())
@@ -286,6 +362,7 @@ impl AdminService {
             disabled: req.disabled,
             kiro_api_key: req.kiro_api_key,
             endpoint: req.endpoint,
+            supported_models: req.supported_models,
         };
 
         // 调用 token_manager 添加凭据
@@ -301,6 +378,62 @@ impl AdminService {
             credential_id,
             email,
         })
+    }
+
+    /// 使用当前账号从上游获取可用模型列表
+    pub async fn get_credential_models(
+        &self,
+        id: u64,
+    ) -> Result<CredentialModelsResponse, AdminServiceError> {
+        let selected_models = self
+            .token_manager
+            .get_supported_models(id)
+            .map_err(|e| self.classify_error(e, id))?;
+        let models = self
+            .token_manager
+            .list_available_models_for(id)
+            .await
+            .map_err(|e| self.classify_balance_error(e, id))?
+            .into_iter()
+            .map(|option| CredentialModelOption {
+                id: option.id,
+                display_name: option.display_name,
+                upstream_id: option.upstream_id,
+                available: option.available,
+                reason: option.reason,
+            })
+            .collect();
+
+        Ok(CredentialModelsResponse {
+            credential_id: id,
+            selected_models,
+            models,
+        })
+    }
+
+    /// 设置当前账号可用模型列表
+    pub fn set_supported_models(
+        &self,
+        id: u64,
+        req: SetSupportedModelsRequest,
+    ) -> Result<SuccessResponse, AdminServiceError> {
+        let models = self
+            .token_manager
+            .set_supported_models(id, req.models)
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("不存在") {
+                    AdminServiceError::NotFound { id }
+                } else {
+                    AdminServiceError::InvalidCredential(msg)
+                }
+            })?;
+        let message = if models.is_empty() {
+            format!("凭据 #{} 已设置为不限制模型", id)
+        } else {
+            format!("凭据 #{} 可用模型已更新（{} 个）", id, models.len())
+        };
+        Ok(SuccessResponse::new(message))
     }
 
     /// 删除凭据

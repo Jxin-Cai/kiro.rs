@@ -8,6 +8,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::http_client::ProxyConfig;
+use crate::kiro::model::model_catalog::{canonicalize_model_id, canonicalize_model_list};
 use crate::model::config::Config;
 
 /// Kiro OAuth 凭证
@@ -109,6 +110,13 @@ pub struct KiroCredentials {
     /// 端点名必须在启动时注册的端点 registry 中存在。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+
+    /// 该账号允许路由的 canonical Kiro 模型 ID 列表。
+    ///
+    /// 空列表表示不限制模型；非空时只路由列表内模型。
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub supported_models: Vec<String>,
 }
 
 /// 判断是否为零（用于跳过序列化）
@@ -170,6 +178,7 @@ impl CredentialsConfig {
         match self {
             CredentialsConfig::Single(mut cred) => {
                 cred.canonicalize_auth_method();
+                cred.canonicalize_supported_models();
                 vec![cred]
             }
             CredentialsConfig::Multiple(mut creds) => {
@@ -177,6 +186,7 @@ impl CredentialsConfig {
                 creds.sort_by_key(|c| c.priority);
                 for cred in &mut creds {
                     cred.canonicalize_auth_method();
+                    cred.canonicalize_supported_models();
                 }
                 creds
             }
@@ -244,6 +254,35 @@ impl KiroCredentials {
         if canonical != auth_method {
             self.auth_method = Some(canonical.to_string());
         }
+    }
+
+    /// 规范化账号支持的模型列表。
+    pub fn canonicalize_supported_models(&mut self) {
+        match canonicalize_model_list(&self.supported_models) {
+            Ok(models) => self.supported_models = models,
+            Err(e) => {
+                tracing::warn!("忽略无效 supportedModels 配置: {}", e);
+                self.supported_models.clear();
+            }
+        }
+    }
+
+    /// 检查凭据是否支持指定模型。
+    pub fn supports_model(&self, model: Option<&str>) -> bool {
+        let Some(model) = model else {
+            return true;
+        };
+        let Some(canonical) = canonicalize_model_id(model) else {
+            return false;
+        };
+        if canonical.contains("opus") && !self.supports_opus() {
+            return false;
+        }
+        self.supported_models.is_empty()
+            || self
+                .supported_models
+                .iter()
+                .any(|supported| supported == &canonical)
     }
 
     /// 检查凭据是否支持 Opus 模型
@@ -343,6 +382,7 @@ mod tests {
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
+            supported_models: Vec::new(),
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -351,6 +391,35 @@ mod tests {
         assert!(!json.contains("refreshToken"));
         // priority 为 0 时不序列化
         assert!(!json.contains("priority"));
+    }
+
+    #[test]
+    fn test_supported_models_default_and_serialization() {
+        let creds = KiroCredentials::from_json(r#"{"refreshToken":"test"}"#).unwrap();
+        assert!(creds.supported_models.is_empty());
+        let json = creds.to_pretty_json().unwrap();
+        assert!(!json.contains("supportedModels"));
+
+        let creds = KiroCredentials::from_json(
+            r#"{"refreshToken":"test","supportedModels":["claude-sonnet-4-6","claude-opus-4-7-thinking"]}"#,
+        )
+        .unwrap();
+        assert_eq!(creds.supported_models.len(), 2);
+    }
+
+    #[test]
+    fn test_supports_model_with_allowlist_and_opus_subscription() {
+        let mut creds = KiroCredentials {
+            supported_models: vec!["claude-sonnet-4.6".to_string()],
+            ..Default::default()
+        };
+        assert!(creds.supports_model(None));
+        assert!(creds.supports_model(Some("claude-sonnet-4-6-thinking")));
+        assert!(!creds.supports_model(Some("claude-opus-4-7")));
+
+        creds.supported_models = vec!["claude-opus-4.7".to_string()];
+        creds.subscription_title = Some("KIRO FREE".to_string());
+        assert!(!creds.supports_model(Some("claude-opus-4-7")));
     }
 
     #[test]
@@ -461,6 +530,7 @@ mod tests {
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
+            supported_models: Vec::new(),
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -492,6 +562,7 @@ mod tests {
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
+            supported_models: Vec::new(),
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -606,6 +677,7 @@ mod tests {
             disabled: false,
             kiro_api_key: None,
             endpoint: None,
+            supported_models: Vec::new(),
         };
 
         let json = original.to_pretty_json().unwrap();

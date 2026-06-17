@@ -2,23 +2,28 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::IntoResponse,
 };
 
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, ExportCredentialsRequest, SetDisabledRequest,
-        SetLoadBalancingModeRequest, SetPriorityRequest, SuccessResponse,
+        AddCredentialRequest, CredentialsQuery, ExportCredentialsRequest, SetDisabledRequest,
+        SetLoadBalancingModeRequest, SetPriorityRequest, SetSupportedModelsRequest, SuccessResponse,
     },
 };
 
 /// GET /api/admin/credentials
 /// 获取所有凭据状态
-pub async fn get_all_credentials(State(state): State<AdminState>) -> impl IntoResponse {
-    let response = state.service.get_all_credentials();
-    Json(response)
+pub async fn get_all_credentials(
+    State(state): State<AdminState>,
+    Query(query): Query<CredentialsQuery>,
+) -> impl IntoResponse {
+    match state.service.get_all_credentials(query) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
 }
 
 /// POST /api/admin/credentials/:id/disabled
@@ -66,6 +71,31 @@ pub async fn reset_failure_count(
             id
         )))
         .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/credentials/:id/models
+/// 使用指定凭据从真实上游获取可用模型
+pub async fn get_credential_models(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.service.get_credential_models(id).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// PUT /api/admin/credentials/:id/models
+/// 设置指定凭据可用模型
+pub async fn set_credential_models(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<SetSupportedModelsRequest>,
+) -> impl IntoResponse {
+    match state.service.set_supported_models(id, payload) {
+        Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }

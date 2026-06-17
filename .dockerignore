@@ -43,7 +43,7 @@ tools/
 Thumbs.db
 
 # Local configuration (keep templates only)
-config.json
+config/config.json
 credentials.json
 
 # Docker files

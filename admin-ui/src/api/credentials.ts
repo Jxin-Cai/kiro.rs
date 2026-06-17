@@ -8,6 +8,9 @@ import type {
   SetPriorityRequest,
   AddCredentialRequest,
   AddCredentialResponse,
+  CredentialsQuery,
+  CredentialModelsResponse,
+  SetSupportedModelsRequest,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -28,8 +31,12 @@ api.interceptors.request.use((config) => {
 })
 
 // 获取所有凭据状态
-export async function getCredentials(): Promise<CredentialsStatusResponse> {
-  const { data } = await api.get<CredentialsStatusResponse>('/credentials')
+export async function getCredentials(
+  query?: CredentialsQuery
+): Promise<CredentialsStatusResponse> {
+  const { data } = await api.get<CredentialsStatusResponse>('/credentials', {
+    params: query,
+  })
   return data
 }
 
@@ -76,6 +83,24 @@ export async function forceRefreshToken(
 // 获取凭据余额
 export async function getCredentialBalance(id: number): Promise<BalanceResponse> {
   const { data } = await api.get<BalanceResponse>(`/credentials/${id}/balance`)
+  return data
+}
+
+// 获取当前凭据可用模型
+export async function getCredentialModels(id: number): Promise<CredentialModelsResponse> {
+  const { data } = await api.get<CredentialModelsResponse>(`/credentials/${id}/models`)
+  return data
+}
+
+// 设置当前凭据可用模型
+export async function setCredentialModels(
+  id: number,
+  models: string[]
+): Promise<SuccessResponse> {
+  const { data } = await api.put<SuccessResponse>(
+    `/credentials/${id}/models`,
+    { models } as SetSupportedModelsRequest
+  )
   return data
 }
 

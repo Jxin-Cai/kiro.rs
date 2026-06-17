@@ -6,18 +6,20 @@ import {
   resetCredentialFailure,
   forceRefreshToken,
   getCredentialBalance,
+  getCredentialModels,
+  setCredentialModels,
   addCredential,
   deleteCredential,
   getLoadBalancingMode,
   setLoadBalancingMode,
 } from '@/api/credentials'
-import type { AddCredentialRequest } from '@/types/api'
+import type { AddCredentialRequest, CredentialsQuery } from '@/types/api'
 
 // 查询凭据列表
-export function useCredentials() {
+export function useCredentials(query?: CredentialsQuery) {
   return useQuery({
-    queryKey: ['credentials'],
-    queryFn: getCredentials,
+    queryKey: query ? ['credentials', query] : ['credentials'],
+    queryFn: () => getCredentials(query),
     refetchInterval: 30000, // 每 30 秒刷新一次
   })
 }
@@ -29,6 +31,29 @@ export function useCredentialBalance(id: number | null) {
     queryFn: () => getCredentialBalance(id!),
     enabled: id !== null,
     retry: false, // 余额查询失败时不重试（避免重复请求被封禁的账号）
+  })
+}
+
+// 查询凭据可用模型
+export function useCredentialModels(id: number | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ['credential-models', id],
+    queryFn: () => getCredentialModels(id!),
+    enabled: enabled && id !== null,
+    retry: false,
+  })
+}
+
+// 设置凭据可用模型
+export function useSetCredentialModels() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, models }: { id: number; models: string[] }) =>
+      setCredentialModels(id, models),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      queryClient.invalidateQueries({ queryKey: ['credential-models', variables.id] })
+    },
   })
 }
 

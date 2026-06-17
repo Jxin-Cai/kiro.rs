@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge'
 import { BatchActionBar } from '@/components/account-pool/batch-action-bar'
 import { CredentialCompactCard } from '@/components/account-pool/credential-compact-card'
 import { CredentialDetailSheet } from '@/components/account-pool/credential-detail-sheet'
+import { CredentialModelsDialog } from '@/components/account-pool/credential-models-dialog'
 import { CredentialPoolTable } from '@/components/account-pool/credential-pool-table'
 import {
   PoolToolbar,
@@ -28,12 +29,9 @@ import {
   canRefreshCredentialToken,
   canResetCredentialFailure,
   canVerifyCredential,
-  matchesAuthMethodFilter,
-  matchesCredentialStatusFilter,
   type AuthMethodFilter,
   type CredentialStatusFilter,
 } from '@/lib/credential-status'
-import { getCredentialSearchText } from '@/lib/credential-format'
 import { extractErrorMessage } from '@/lib/utils'
 import type { BalanceResponse, CredentialStatusItem } from '@/types/api'
 
@@ -41,40 +39,25 @@ interface DashboardProps {
   onLogout: () => void
 }
 
-function compareNullableString(a: string | null | undefined, b: string | null | undefined) {
-  return (a || '').localeCompare(b || '', 'zh-CN')
+function createKamExportFileName() {
+  const now = new Date()
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+  const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  return `kiro-kam-accounts-${date}-${time}.json`
 }
 
-function compareCredential(
-  a: CredentialStatusItem,
-  b: CredentialStatusItem,
-  sortKey: CredentialSortKey
-) {
-  switch (sortKey) {
-    case 'status':
-      return Number(a.disabled) - Number(b.disabled) || a.failureCount - b.failureCount
-    case 'email':
-      return compareNullableString(a.email, b.email) || a.id - b.id
-    case 'failures':
-      return (
-        a.failureCount + a.refreshFailureCount -
-          (b.failureCount + b.refreshFailureCount) ||
-        a.id - b.id
-      )
-    case 'success':
-      return a.successCount - b.successCount || a.id - b.id
-    case 'lastUsed':
-      return (
-        new Date(a.lastUsedAt || 0).getTime() -
-          new Date(b.lastUsedAt || 0).getTime() ||
-        a.id - b.id
-      )
-    case 'id':
-      return a.id - b.id
-    case 'priority':
-    default:
-      return a.priority - b.priority || a.id - b.id
-  }
+function downloadJson(data: unknown, fileName: string) {
+  const json = JSON.stringify(data, null, 2)
+  const blob = new Blob([json], { type: 'application/json;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
 }
 
 function createExportFileName() {
@@ -101,6 +84,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [loadingBalanceIds, setLoadingBalanceIds] = useState<Set<number>>(new Set())
   const [activeCredentialId, setActiveCredentialId] = useState<number | null>(null)
   const [detailSheetOpen, setDetailSheetOpen] = useState(false)
+  const [modelsCredentialId, setModelsCredentialId] = useState<number | null>(null)
+  const [modelsDialogOpen, setModelsDialogOpen] = useState(false)
   const [queryingInfo, setQueryingInfo] = useState(false)
   const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
   const [batchRefreshing, setBatchRefreshing] = useState(false)
@@ -114,7 +99,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [batchToggleAction, setBatchToggleAction] = useState<'enable' | 'disable' | null>(null)
   const cancelVerifyRef = useRef(false)
   const [currentPage, setCurrentPage] = useState(1)
-  const [pageSize, setPageSize] = useState(12)
+  const [pageSize, setPageSize] = useState(50)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<CredentialStatusFilter>('all')
   const [authMethodFilter, setAuthMethodFilter] = useState<AuthMethodFilter>('all')
@@ -128,8 +113,28 @@ export function Dashboard({ onLogout }: DashboardProps) {
     return false
   })
 
+  const credentialsQuery = useMemo(() => ({
+    page: currentPage,
+    pageSize,
+    search: searchQuery.trim() || undefined,
+    status: statusFilter,
+    authMethod: authMethodFilter,
+    endpoint: endpointFilter,
+    sortKey,
+    sortDirection,
+  }), [
+    authMethodFilter,
+    currentPage,
+    endpointFilter,
+    pageSize,
+    searchQuery,
+    sortDirection,
+    sortKey,
+    statusFilter,
+  ])
+
   const queryClient = useQueryClient()
-  const { data, isLoading, error, refetch } = useCredentials()
+  const { data, isLoading, error, refetch } = useCredentials(credentialsQuery)
   const { mutate: deleteCredential } = useDeleteCredential()
   const { mutate: resetFailure } = useResetFailure()
   const { mutate: setDisabled } = useSetDisabled()
@@ -137,53 +142,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
 
   const allCredentials = useMemo(() => data?.credentials || [], [data?.credentials])
+  const filteredCount = data?.pagination?.totalItems ?? allCredentials.length
 
-  const filteredCredentials = useMemo(() => {
-    const normalizedQuery = searchQuery.trim().toLowerCase()
-    const next = allCredentials.filter((credential) => {
-      if (
-        normalizedQuery &&
-        !getCredentialSearchText(credential).includes(normalizedQuery)
-      ) {
-        return false
-      }
 
-      if (!matchesCredentialStatusFilter(credential, statusFilter)) {
-        return false
-      }
-
-      if (!matchesAuthMethodFilter(credential, authMethodFilter)) {
-        return false
-      }
-
-      if (endpointFilter !== 'all' && credential.endpoint !== endpointFilter) {
-        return false
-      }
-
-      return true
-    })
-
-    next.sort((a, b) => {
-      const result = compareCredential(a, b, sortKey)
-      return sortDirection === 'asc' ? result : -result
-    })
-
-    return next
-  }, [
-    allCredentials,
-    authMethodFilter,
-    endpointFilter,
-    searchQuery,
-    sortDirection,
-    sortKey,
-    statusFilter,
-  ])
-
-  // 计算分页
-  const totalPages = Math.max(1, Math.ceil(filteredCredentials.length / pageSize))
-  const startIndex = (currentPage - 1) * pageSize
-  const endIndex = startIndex + pageSize
-  const currentCredentials = filteredCredentials.slice(startIndex, endIndex)
+  // 后端分页
+  const totalPages = data?.pagination?.totalPages ?? 1
+  const currentCredentials = allCredentials
   const disabledCredentialCount = allCredentials.filter(credential => credential.disabled).length
   const endpointOptions = useMemo(() => {
     return Array.from(new Set(allCredentials.map(credential => credential.endpoint).filter(Boolean))).sort()
@@ -205,6 +169,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const activeCredential = activeCredentialId === null
     ? null
     : allCredentials.find(credential => credential.id === activeCredentialId) || null
+  const modelsCredential = modelsCredentialId === null
+    ? null
+    : allCredentials.find(credential => credential.id === modelsCredentialId) || null
 
   // 当凭据列表或筛选条件变化时重置到第一页
   useEffect(() => {
@@ -317,6 +284,11 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const handleOpenDetails = (id: number) => {
     setActiveCredentialId(id)
     setDetailSheetOpen(true)
+  }
+
+  const handleOpenModels = (id: number) => {
+    setModelsCredentialId(id)
+    setModelsDialogOpen(true)
   }
 
   const handleQueryCredentialBalance = async (id: number) => {
@@ -656,20 +628,53 @@ export function Dashboard({ onLogout }: DashboardProps) {
         return
       }
 
-      const json = JSON.stringify(credentials, null, 2)
-      const blob = new Blob([json], { type: 'application/json;charset=utf-8' })
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = createExportFileName()
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      URL.revokeObjectURL(url)
+      downloadJson(credentials, createExportFileName())
 
       toast.success(`已导出 ${credentials.length} 个凭据`)
     } catch (error) {
       toast.error('导出失败: ' + extractErrorMessage(error))
+    }
+  }
+
+  // 导出选中 OAuth/IdC 凭据为 KAM accounts list
+  const handleExportKamSelected = async () => {
+    if (selectedIds.size === 0) {
+      toast.error('请先选择要导出的 KAM 账号')
+      return
+    }
+
+    try {
+      const credentials = await exportCredentials(Array.from(selectedIds))
+      const kamAccounts = credentials
+        .filter(credential => credential.refreshToken && credential.authMethod !== 'api_key')
+        .map(credential => ({
+          email: credential.email,
+          machineId: credential.machineId,
+          status: credential.disabled ? 'disabled' : 'active',
+          credentials: {
+            refreshToken: credential.refreshToken,
+            clientId: credential.clientId,
+            clientSecret: credential.clientSecret,
+            region: credential.authRegion || credential.region,
+            authMethod: credential.authMethod,
+          },
+        }))
+
+      const skippedCount = credentials.length - kamAccounts.length
+      if (kamAccounts.length === 0) {
+        toast.error('选中账号均不是 KAM refreshToken 账号，请使用普通 JSON 导出 API Key')
+        return
+      }
+
+      downloadJson({ version: 1, accounts: kamAccounts }, createKamExportFileName())
+
+      if (skippedCount > 0) {
+        toast.warning(`已导出 ${kamAccounts.length} 个 KAM 账号，跳过 ${skippedCount} 个 API Key/非 KAM 账号`)
+      } else {
+        toast.success(`已导出 ${kamAccounts.length} 个 KAM 账号`)
+      }
+    } catch (error) {
+      toast.error('KAM 导出失败: ' + extractErrorMessage(error))
     }
   }
 
@@ -1043,8 +1048,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
         {/* 凭据列表 */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-4">
           <PoolToolbar
-            totalCount={allCredentials.length}
-            filteredCount={filteredCredentials.length}
+            totalCount={totalCredentialCount}
+            filteredCount={filteredCount}
             searchQuery={searchQuery}
             statusFilter={statusFilter}
             authMethodFilter={authMethodFilter}
@@ -1099,18 +1104,19 @@ export function Dashboard({ onLogout }: DashboardProps) {
               onBatchSetDisabled={handleBatchSetDisabled}
               onBatchDelete={handleBatchDelete}
               onExportSelected={handleExportSelected}
+              onExportKamSelected={handleExportKamSelected}
               onDeselectAll={deselectAll}
             />
           )}
 
           <div className="min-h-0 min-w-0 flex-1 pb-3">
-            {allCredentials.length === 0 ? (
+            {totalCredentialCount === 0 ? (
             <Card className="h-full">
               <CardContent className="py-8 text-center text-muted-foreground">
                 暂无凭据
               </CardContent>
             </Card>
-          ) : filteredCredentials.length === 0 ? (
+          ) : filteredCount === 0 ? (
             <Card className="h-full">
               <CardContent className="py-8 text-center text-muted-foreground">
                 没有符合条件的凭据
@@ -1128,6 +1134,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   onTogglePageSelection={toggleCurrentPageSelection}
                   onOpenDetails={handleOpenDetails}
                   onViewBalance={handleViewBalance}
+                  onOpenModels={handleOpenModels}
                 />
               </div>
 
@@ -1142,6 +1149,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     onToggleSelect={() => toggleSelect(credential.id)}
                     onOpenDetails={handleOpenDetails}
                     onViewBalance={handleViewBalance}
+                    onOpenModels={handleOpenModels}
                   />
                 ))}
               </div>
@@ -1158,7 +1166,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     上一页
                   </Button>
                   <span className="text-sm text-muted-foreground">
-                    第 {currentPage} / {totalPages} 页（共 {filteredCredentials.length} 个凭据）
+                    第 {currentPage} / {totalPages} 页（共 {filteredCount} 个凭据）
                   </span>
                   <Button
                     variant="outline"
@@ -1191,6 +1199,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
         balanceError={activeCredentialId === null ? null : balanceErrorMap.get(activeCredentialId) || null}
         onOpenChange={setDetailSheetOpen}
         onQueryBalance={handleQueryCredentialBalance}
+      />
+
+      <CredentialModelsDialog
+        open={modelsDialogOpen}
+        onOpenChange={setModelsDialogOpen}
+        credential={modelsCredential}
       />
 
       {/* 添加凭据对话框 */}

@@ -6,6 +6,7 @@ import {
   Loader2,
   MoreHorizontal,
   RefreshCw,
+  SlidersHorizontal,
   RotateCcw,
   Trash2,
   Wallet,
@@ -29,6 +30,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Switch } from '@/components/ui/switch'
+import { formatSupportedModels } from '@/components/account-pool/credential-models-dialog'
 import { StatusBadge } from '@/components/account-pool/status-badge'
 import {
   useDeleteCredential,
@@ -64,6 +66,7 @@ interface CredentialPoolTableProps {
   onTogglePageSelection: (checked: boolean) => void
   onOpenDetails: (id: number) => void
   onViewBalance: (id: number) => void
+  onOpenModels: (id: number) => void
 }
 
 interface CredentialRowProps {
@@ -74,6 +77,7 @@ interface CredentialRowProps {
   onToggleSelect: () => void
   onOpenDetails: (id: number) => void
   onViewBalance: (id: number) => void
+  onOpenModels: (id: number) => void
 }
 
 function CredentialRow({
@@ -84,6 +88,7 @@ function CredentialRow({
   onToggleSelect,
   onOpenDetails,
   onViewBalance,
+  onOpenModels,
 }: CredentialRowProps) {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const setDisabled = useSetDisabled()
@@ -199,6 +204,9 @@ function CredentialRow({
             <span className="truncate text-xs text-muted-foreground" title={credential.endpoint}>
               {credential.endpoint}
             </span>
+            <span className="truncate text-xs text-muted-foreground" title={(credential.supportedModels || []).join(', ') || '全部模型'}>
+              模型：{formatSupportedModels(credential.supportedModels)}
+            </span>
           </div>
         </td>
         <td className="w-24 px-3 py-3 align-middle text-sm font-medium">
@@ -258,6 +266,15 @@ function CredentialRow({
             >
               <Info className="h-4 w-4" />
               <span className="sr-only">查看详情</span>
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-8 px-2"
+              onClick={() => onOpenModels(credential.id)}
+            >
+              <SlidersHorizontal className="h-4 w-4" />
+              <span className="sr-only">设置模型</span>
             </Button>
             <Button
               size="sm"
@@ -359,6 +376,7 @@ export function CredentialPoolTable({
   onTogglePageSelection,
   onOpenDetails,
   onViewBalance,
+  onOpenModels,
 }: CredentialPoolTableProps) {
   const allSelected =
     credentials.length > 0 &&
@@ -411,6 +429,7 @@ export function CredentialPoolTable({
                 onToggleSelect={() => onToggleSelect(credential.id)}
                 onOpenDetails={onOpenDetails}
                 onViewBalance={onViewBalance}
+                onOpenModels={onOpenModels}
               />
             ))}
           </tbody>

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use reqwest::{Client, RequestBuilder};
+use serde_json::Value;
 
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::model::config::Config;
@@ -97,6 +98,8 @@ pub enum KiroRequest<'a> {
     Mcp { body: &'a str },
     /// 获取使用额度（GET 请求，无请求体）
     UsageLimits,
+    /// 获取当前账号可用模型列表（GET 请求，无请求体）
+    ListAvailableModels { next_token: Option<&'a str> },
 }
 
 /// Endpoint 层错误语义分类
@@ -180,6 +183,17 @@ pub struct RequestContext<'a> {
     pub machine_id: &'a str,
     /// 全局配置
     pub config: &'a Config,
+}
+
+/// 从上游模型列表响应提取分页 token。
+pub fn extract_next_token(value: &Value) -> Option<String> {
+    value
+        .get("nextToken")
+        .or_else(|| value.get("NextToken"))
+        .or_else(|| value.get("next_token"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
 }
 
 /// 默认的 MONTHLY_REQUEST_COUNT 判断逻辑

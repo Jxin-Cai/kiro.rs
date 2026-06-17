@@ -1,9 +1,28 @@
 // 凭据状态响应
+export interface CredentialsPagination {
+  page: number
+  pageSize: number
+  totalItems: number
+  totalPages: number
+}
+
+export interface CredentialsQuery {
+  page: number
+  pageSize: number
+  search?: string
+  status?: string
+  authMethod?: string
+  endpoint?: string
+  sortKey?: string
+  sortDirection?: 'asc' | 'desc'
+}
+
 export interface CredentialsStatusResponse {
   total: number
   available: number
   currentId: number
   credentials: CredentialStatusItem[]
+  pagination: CredentialsPagination
 }
 
 // 单个凭据状态
@@ -27,6 +46,7 @@ export interface CredentialStatusItem {
   refreshFailureCount: number
   disabledReason?: string
   endpoint: string
+  supportedModels: string[]
 }
 
 // 余额响应
@@ -81,6 +101,25 @@ export interface AddCredentialRequest {
   proxyPassword?: string
   kiroApiKey?: string
   endpoint?: string
+  supportedModels?: string[]
+}
+
+export interface CredentialModelOption {
+  id: string
+  displayName: string
+  upstreamId?: string
+  available: boolean
+  reason?: string
+}
+
+export interface CredentialModelsResponse {
+  credentialId: number
+  selectedModels: string[]
+  models: CredentialModelOption[]
+}
+
+export interface SetSupportedModelsRequest {
+  models: string[]
 }
 
 // 添加凭据响应

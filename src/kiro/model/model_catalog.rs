@@ -63,12 +63,22 @@ pub fn canonicalize_model_id(model: &str) -> Option<String> {
 pub fn canonicalize_model_list(models: &[String]) -> Result<Vec<String>, String> {
     let mut result = BTreeSet::new();
     for model in models {
-        let canonical = canonicalize_model_id(model)
-            .ok_or_else(|| format!("不支持的模型: {}", model))?;
+        let canonical =
+            canonicalize_model_id(model).ok_or_else(|| format!("不支持的模型: {}", model))?;
         result.insert(canonical);
     }
     Ok(result.into_iter().collect())
 }
+
+const KNOWN_CANONICAL_MODELS: &[&str] = &[
+    "claude-haiku-4.5",
+    "claude-opus-4.5",
+    "claude-opus-4.6",
+    "claude-opus-4.7",
+    "claude-opus-4.8",
+    "claude-sonnet-4.5",
+    "claude-sonnet-4.6",
+];
 
 /// canonical 模型 ID 的展示名称。
 pub fn display_name_for_canonical_model(id: &str) -> String {
@@ -82,6 +92,19 @@ pub fn display_name_for_canonical_model(id: &str) -> String {
         "claude-haiku-4.5" => "Claude Haiku 4.5".to_string(),
         other => other.to_string(),
     }
+}
+
+pub fn known_model_options(reason: Option<String>) -> Vec<ModelOption> {
+    KNOWN_CANONICAL_MODELS
+        .iter()
+        .map(|id| ModelOption {
+            id: (*id).to_string(),
+            display_name: display_name_for_canonical_model(id),
+            upstream_id: None,
+            available: true,
+            reason: reason.clone(),
+        })
+        .collect()
 }
 
 /// 从上游 ListAvailableModels 响应中尽量提取模型列表。
@@ -171,7 +194,10 @@ mod tests {
         ];
         assert_eq!(
             canonicalize_model_list(&models).unwrap(),
-            vec!["claude-opus-4.7".to_string(), "claude-sonnet-4.6".to_string()]
+            vec![
+                "claude-opus-4.7".to_string(),
+                "claude-sonnet-4.6".to_string()
+            ]
         );
     }
 
@@ -189,5 +215,23 @@ mod tests {
         assert_eq!(options.len(), 2);
         assert_eq!(options[0].id, "claude-opus-4.7");
         assert_eq!(options[1].id, "claude-sonnet-4.6");
+    }
+
+    #[test]
+    fn known_model_options_include_reason() {
+        let options = known_model_options(Some("fallback".to_string()));
+        assert_eq!(options.len(), 7);
+        assert!(options.iter().all(|option| option.available));
+        assert!(
+            options
+                .iter()
+                .all(|option| option.reason.as_deref() == Some("fallback"))
+        );
+        assert!(options.iter().any(|option| option.id == "claude-opus-4.8"));
+        assert!(
+            options
+                .iter()
+                .any(|option| option.id == "claude-sonnet-4.6")
+        );
     }
 }

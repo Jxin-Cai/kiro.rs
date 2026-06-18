@@ -614,6 +614,7 @@ impl AdminService {
             || msg.contains("凭据已存在")
             || msg.contains("refreshToken 重复")
             || msg.contains("kiroApiKey 重复")
+            || msg.contains("email 重复")
             || msg.contains("缺少 kiroApiKey")
             || msg.contains("kiroApiKey 为空")
             || msg.contains("凭证已过期或无效")

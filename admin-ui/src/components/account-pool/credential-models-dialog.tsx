@@ -163,8 +163,10 @@ export function CredentialModelsDialog({
                           {model.id}
                           {model.upstreamId && model.upstreamId !== model.id ? ` · ${model.upstreamId}` : ''}
                         </span>
-                        {!model.available && model.reason && (
-                          <span className="block text-xs text-destructive">{model.reason}</span>
+                        {model.reason && (
+                          <span className={model.available ? 'block text-xs text-amber-600 dark:text-amber-400' : 'block text-xs text-destructive'}>
+                            {model.reason}
+                          </span>
                         )}
                       </span>
                     </label>

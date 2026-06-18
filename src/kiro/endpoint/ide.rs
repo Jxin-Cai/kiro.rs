@@ -73,7 +73,10 @@ impl IdeEndpoint {
         next_token: Option<&str>,
     ) -> String {
         let host = self.host(ctx);
-        let mut url = format!("https://{}/ListAvailableModels?origin=AI_EDITOR&maxResults=50", host);
+        let mut url = format!(
+            "https://{}/ListAvailableModels?origin=AI_EDITOR&maxResults=50",
+            host
+        );
         if let Some(profile_arn) = &ctx.credentials.profile_arn {
             url.push_str(&format!("&profileArn={}", urlencoding::encode(profile_arn)));
         }
@@ -372,6 +375,7 @@ mod tests {
             },
             KiroRequest::Mcp { body: "{}" },
             KiroRequest::UsageLimits,
+            KiroRequest::ListAvailableModels { next_token: None },
         ] {
             let built = endpoint
                 .build_request(&client, &ctx, &req)

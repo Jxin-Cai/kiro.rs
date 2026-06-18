@@ -18,10 +18,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::http_client::{ProxyConfig, build_client};
-use crate::kiro::endpoint::{EndpointRegistry, KiroEndpoint, KiroRequest, RequestContext, extract_next_token};
+use crate::kiro::endpoint::{
+    EndpointRegistry, KiroEndpoint, KiroRequest, RequestContext, extract_next_token,
+};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::model::model_catalog::{ModelOption, canonicalize_model_list, model_options_from_upstream_value};
+use crate::kiro::model::model_catalog::{
+    ModelOption, canonicalize_model_list, known_model_options, model_options_from_upstream_value,
+};
 use crate::kiro::model::token_refresh::{
     IdcRefreshRequest, IdcRefreshResponse, RefreshRequest, RefreshResponse,
 };
@@ -55,6 +59,15 @@ fn sha256_hex(input: &str) -> String {
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
     format!("{:x}", result)
+}
+
+fn normalize_email(email: &str) -> Option<String> {
+    let email = email.trim();
+    if email.is_empty() {
+        None
+    } else {
+        Some(email.to_lowercase())
+    }
 }
 
 /// 生成 API Key 脱敏展示(前 4 + ... + 后 4,长度不足或非 ASCII 回退 ***)
@@ -804,7 +817,9 @@ impl MultiTokenManager {
                     let current_id = *self.current_id.lock();
                     entries
                         .iter()
-                        .find(|e| e.id == current_id && !e.disabled && e.credentials.supports_model(model))
+                        .find(|e| {
+                            e.id == current_id && !e.disabled && e.credentials.supports_model(model)
+                        })
                         .map(|e| (e.id, e.credentials.clone()))
                 };
 
@@ -852,7 +867,12 @@ impl MultiTokenManager {
                             .count();
                         if available > 0 && model_supported == 0 {
                             let model_label = model.unwrap_or("未知模型");
-                            anyhow::bail!("没有可用于模型 {} 的凭据（可用账号: {}/{}）", model_label, available, total);
+                            anyhow::bail!(
+                                "没有可用于模型 {} 的凭据（可用账号: {}/{}）",
+                                model_label,
+                                available,
+                                total
+                            );
                         }
                         anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
                     }
@@ -1602,7 +1622,11 @@ impl MultiTokenManager {
     }
 
     /// 设置指定凭据的可用模型列表（Admin API）
-    pub fn set_supported_models(&self, id: u64, models: Vec<String>) -> anyhow::Result<Vec<String>> {
+    pub fn set_supported_models(
+        &self,
+        id: u64,
+        models: Vec<String>,
+    ) -> anyhow::Result<Vec<String>> {
         let models = canonicalize_model_list(&models).map_err(|e| anyhow::anyhow!(e))?;
         {
             let mut entries = self.entries.lock();
@@ -1694,7 +1718,27 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
 
-        let ctx = self.try_ensure_token(id, &credentials).await?;
+        match self.fetch_available_models_for(id, &credentials).await {
+            Ok(options) if !options.is_empty() => Ok(options),
+            Ok(_) => Ok(known_model_options(Some(
+                "上游未返回可识别模型，已使用本地模型目录".to_string(),
+            ))),
+            Err(e) => {
+                tracing::warn!("凭据 #{} 查询上游模型失败，使用本地模型目录: {}", id, e);
+                Ok(known_model_options(Some(format!(
+                    "上游模型查询失败，已使用本地模型目录: {}",
+                    e
+                ))))
+            }
+        }
+    }
+
+    async fn fetch_available_models_for(
+        &self,
+        id: u64,
+        credentials: &KiroCredentials,
+    ) -> anyhow::Result<Vec<ModelOption>> {
+        let ctx = self.try_ensure_token(id, credentials).await?;
         let effective_proxy = ctx.credentials().effective_proxy(self.proxy.as_ref());
         let client = build_client(effective_proxy.as_ref(), 60, self.config.tls_backend)?;
         let endpoint = ctx.endpoint();
@@ -1754,7 +1798,25 @@ impl MultiTokenManager {
             validate_refresh_token(&new_cred)?;
         }
 
-        // 2. 基于哈希检测重复
+        // 2. 基于邮箱和凭据哈希检测重复
+        if let Some(new_email) = new_cred.email.as_deref().and_then(normalize_email) {
+            let duplicate_exists = {
+                let entries = self.entries.lock();
+                entries.iter().any(|entry| {
+                    entry
+                        .credentials
+                        .email
+                        .as_deref()
+                        .and_then(normalize_email)
+                        .as_deref()
+                        == Some(new_email.as_str())
+                })
+            };
+            if duplicate_exists {
+                anyhow::bail!("凭据已存在（email 重复）");
+            }
+        }
+
         if new_cred.is_api_key_credential() {
             let new_api_key = new_cred
                 .kiro_api_key
@@ -1835,8 +1897,8 @@ impl MultiTokenManager {
         validated_cred.proxy_password = new_cred.proxy_password;
         validated_cred.disabled = new_cred.disabled;
         validated_cred.kiro_api_key = new_cred.kiro_api_key;
-        validated_cred.supported_models = canonicalize_model_list(&new_cred.supported_models)
-            .map_err(|e| anyhow::anyhow!(e))?;
+        validated_cred.supported_models =
+            canonicalize_model_list(&new_cred.supported_models).map_err(|e| anyhow::anyhow!(e))?;
         let disabled = validated_cred.disabled;
 
         {
@@ -2144,6 +2206,27 @@ mod tests {
         let result = manager.add_credential(duplicate).await;
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("凭据已存在"));
+    }
+
+    #[tokio::test]
+    async fn test_add_credential_reject_duplicate_email() {
+        let config = Config::default();
+
+        let mut existing = KiroCredentials::default();
+        existing.refresh_token = Some("a".repeat(150));
+        existing.email = Some("User@Example.com".to_string());
+
+        let manager =
+            MultiTokenManager::new(config, vec![existing], None, None, false, test_registry())
+                .unwrap();
+
+        let mut duplicate = KiroCredentials::default();
+        duplicate.refresh_token = Some("b".repeat(150));
+        duplicate.email = Some(" user@example.com ".to_string());
+
+        let result = manager.add_credential(duplicate).await;
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("email 重复"));
     }
 
     #[tokio::test]

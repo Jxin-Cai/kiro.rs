@@ -46,7 +46,10 @@ interface VerificationResult {
   rollbackError?: string
 }
 
-
+function normalizeEmail(email?: string) {
+  const trimmed = email?.trim().toLowerCase()
+  return trimmed || undefined
+}
 
 // 兼容 KAM 1.8.3 新版平铺格式，统一转换为旧格式（credentials 嵌套结构）
 function normalizeKamAccount(item: unknown): unknown {
@@ -215,6 +218,11 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
           .map(c => c.refreshTokenHash)
           .filter((hash): hash is string => Boolean(hash)) || []
       )
+      const existingEmails = new Set(
+        existingCredentials?.credentials
+          .map(c => normalizeEmail(c.email))
+          .filter((email): email is string => Boolean(email)) || []
+      )
 
       let successCount = 0
       let duplicateCount = 0
@@ -234,6 +242,7 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
         const cred = account.credentials
         const token = cred.refreshToken.trim()
         const tokenHash = await sha256Hex(token)
+        const accountEmail = normalizeEmail(account.email)
 
         setCurrentProcessing(`正在处理 ${account.email || account.nickname || `账号 ${i + 1}`}`)
         setResults(prev => {
@@ -243,6 +252,17 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
         })
 
         // 检查重复
+        if (accountEmail && existingEmails.has(accountEmail)) {
+          duplicateCount++
+          const existingCred = existingCredentials?.credentials.find(c => normalizeEmail(c.email) === accountEmail)
+          setResults(prev => {
+            const next = [...prev]
+            next[i] = { ...next[i], status: 'duplicate', error: '该邮箱账号已存在', email: existingCred?.email || account.email }
+            return next
+          })
+          setProgress({ current: i + 1, total: validAccounts.length })
+          continue
+        }
         if (existingTokenHashes.has(tokenHash)) {
           duplicateCount++
           const existingCred = existingCredentials?.credentials.find(c => c.refreshTokenHash === tokenHash)
@@ -281,6 +301,7 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
             clientId,
             clientSecret,
             machineId: account.machineId?.trim() || undefined,
+            email: account.email?.trim() || undefined,
           })
 
           addedCredId = addedCred.credentialId
@@ -291,6 +312,7 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
 
           successCount++
           existingTokenHashes.add(tokenHash)
+          if (accountEmail) existingEmails.add(accountEmail)
           setCurrentProcessing(`验活成功: ${addedCred.email || account.email || `账号 ${i + 1}`}`)
           setResults(prev => {
             const next = [...prev]

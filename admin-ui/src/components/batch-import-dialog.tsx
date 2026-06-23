@@ -26,6 +26,7 @@ interface CredentialInput {
   authRegion?: string
   apiRegion?: string
   priority?: number
+  disabled?: boolean
   machineId?: string
   email?: string
   proxyUrl?: string
@@ -34,6 +35,7 @@ interface CredentialInput {
   kiroApiKey?: string
   authMethod?: string
   endpoint?: string
+  supportedModels?: string[]
 }
 
 interface VerificationResult {
@@ -265,10 +267,12 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               apiRegion: cred.apiRegion?.trim() || undefined,
               machineId: cred.machineId?.trim() || undefined,
               email: cred.email?.trim() || undefined,
+              disabled: cred.disabled || false,
               proxyUrl: cred.proxyUrl?.trim() || undefined,
               proxyUsername: cred.proxyUsername?.trim() || undefined,
               proxyPassword: cred.proxyPassword?.trim() || undefined,
               endpoint: cred.endpoint?.trim() || undefined,
+              supportedModels: cred.supportedModels || [],
             })
 
             addedCredId = addedCred.credentialId
@@ -320,10 +324,12 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             priority: cred.priority || 0,
             machineId: cred.machineId?.trim() || undefined,
             email: cred.email?.trim() || undefined,
+            disabled: cred.disabled || false,
             proxyUrl: cred.proxyUrl?.trim() || undefined,
             proxyUsername: cred.proxyUsername?.trim() || undefined,
             proxyPassword: cred.proxyPassword?.trim() || undefined,
             endpoint: cred.endpoint?.trim() || undefined,
+            supportedModels: cred.supportedModels || [],
           })
 
           addedCredId = addedCred.credentialId

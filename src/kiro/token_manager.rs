@@ -1556,7 +1556,6 @@ impl MultiTokenManager {
             credential.profile_arn = None;
             credential.expires_at = None;
             credential.subscription_title = None;
-            credential.disabled = false;
             exported.push(credential);
         }
 
@@ -2433,6 +2432,40 @@ mod tests {
         }
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_export_credentials_preserves_importable_fields() {
+        let config = Config::default();
+        let mut credential = api_key_credential("ksk_export_key");
+        credential.id = Some(1);
+        credential.priority = 7;
+        credential.disabled = true;
+        credential.email = Some("user@example.com".to_string());
+        credential.endpoint = Some("ide".to_string());
+        credential.supported_models = vec!["claude-sonnet-4-6".to_string()];
+        credential.access_token = Some("runtime_access_token".to_string());
+        credential.expires_at = Some("2026-01-01T00:00:00Z".to_string());
+        credential.profile_arn = Some("arn:aws:test".to_string());
+        credential.subscription_title = Some("KIRO FREE".to_string());
+
+        let manager =
+            MultiTokenManager::new(config, vec![credential], None, None, true, test_registry())
+                .unwrap();
+
+        let exported = manager.export_credentials(&[1]).unwrap();
+
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].id, None);
+        assert_eq!(exported[0].priority, 7);
+        assert!(exported[0].disabled);
+        assert_eq!(exported[0].email.as_deref(), Some("user@example.com"));
+        assert_eq!(exported[0].endpoint.as_deref(), Some("ide"));
+        assert_eq!(exported[0].supported_models, vec!["claude-sonnet-4.6"]);
+        assert_eq!(exported[0].access_token, None);
+        assert_eq!(exported[0].expires_at, None);
+        assert_eq!(exported[0].profile_arn, None);
+        assert_eq!(exported[0].subscription_title, None);
     }
 
     #[tokio::test]

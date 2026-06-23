@@ -528,8 +528,8 @@ pub struct MultiTokenManager {
     refresh_lock: TokioMutex<()>,
     /// 凭据文件路径（用于回写）
     credentials_path: Option<PathBuf>,
-    /// 是否为多凭据格式（数组格式才回写）
-    is_multiple_format: bool,
+    /// 当前凭据文件是否以数组格式持久化
+    is_multiple_format: AtomicBool,
     /// 负载均衡模式（运行时可修改）
     load_balancing_mode: Mutex<String>,
     /// 最近一次统计持久化时间（用于 debounce）
@@ -605,7 +605,7 @@ impl MultiTokenManager {
     /// * `credentials` - 凭据列表
     /// * `proxy` - 可选的代理配置
     /// * `credentials_path` - 凭据文件路径（用于回写）
-    /// * `is_multiple_format` - 是否为多凭据格式（数组格式才回写）
+    /// * `is_multiple_format` - 凭据文件启动时是否为数组格式
     pub fn new(
         config: Config,
         credentials: Vec<KiroCredentials>,
@@ -703,7 +703,7 @@ impl MultiTokenManager {
             current_id: Mutex::new(initial_id),
             refresh_lock: TokioMutex::new(()),
             credentials_path,
-            is_multiple_format,
+            is_multiple_format: AtomicBool::new(is_multiple_format),
             load_balancing_mode: Mutex::new(load_balancing_mode),
             last_stats_save_at: Mutex::new(None),
             stats_dirty: AtomicBool::new(false),
@@ -712,10 +712,10 @@ impl MultiTokenManager {
 
         // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
         if has_new_ids || has_new_machine_ids {
-            if let Err(e) = manager.persist_credentials() {
-                tracing::warn!("补全凭据 ID/machineId 后持久化失败: {}", e);
-            } else {
-                tracing::info!("已补全凭据 ID/machineId 并写回配置文件");
+            match manager.persist_credentials() {
+                Ok(true) => tracing::info!("已补全凭据 ID/machineId 并写回配置文件"),
+                Ok(false) => tracing::debug!("凭据文件路径未知，跳过补全凭据 ID/machineId 写回"),
+                Err(e) => tracing::warn!("补全凭据 ID/machineId 后持久化失败: {}", e),
             }
         }
 
@@ -1027,21 +1027,14 @@ impl MultiTokenManager {
 
     /// 将凭据列表回写到源文件
     ///
-    /// 仅在以下条件满足时回写：
-    /// - 源文件是多凭据格式（数组）
-    /// - credentials_path 已设置
+    /// 单对象格式在需要表达 0 个或多个凭据时会自动迁移为数组格式。
     ///
     /// # Returns
     /// - `Ok(true)` - 成功写入文件
-    /// - `Ok(false)` - 跳过写入（非多凭据格式或无路径配置）
+    /// - `Ok(false)` - 跳过写入（无路径配置）
     /// - `Err(_)` - 写入失败
     fn persist_credentials(&self) -> anyhow::Result<bool> {
         use anyhow::Context;
-
-        // 仅多凭据格式才回写
-        if !self.is_multiple_format {
-            return Ok(false);
-        }
 
         let path = match &self.credentials_path {
             Some(p) => p,
@@ -1064,15 +1057,28 @@ impl MultiTokenManager {
                 .collect()
         };
 
-        // 序列化为 pretty JSON
-        let json = serde_json::to_string_pretty(&credentials).context("序列化凭据失败")?;
-
-        // 写入文件（在 Tokio runtime 内使用 block_in_place 避免阻塞 worker）
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(|| std::fs::write(path, &json))
-                .with_context(|| format!("回写凭据文件失败: {:?}", path))?;
+        let is_multiple_format = self.is_multiple_format.load(Ordering::Relaxed);
+        let should_write_array = is_multiple_format || credentials.len() != 1;
+        let json = if should_write_array {
+            serde_json::to_string_pretty(&credentials).context("序列化凭据失败")?
         } else {
-            std::fs::write(path, &json).with_context(|| format!("回写凭据文件失败: {:?}", path))?;
+            serde_json::to_string_pretty(&credentials[0]).context("序列化凭据失败")?
+        };
+
+        // 写入文件（在多线程 Tokio runtime 内使用 block_in_place 避免阻塞 worker）
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| std::fs::write(path, &json))
+                    .with_context(|| format!("回写凭据文件失败: {:?}", path))?;
+            }
+            _ => {
+                std::fs::write(path, &json)
+                    .with_context(|| format!("回写凭据文件失败: {:?}", path))?;
+            }
+        }
+
+        if should_write_array {
+            self.is_multiple_format.store(true, Ordering::Relaxed);
         }
 
         tracing::debug!("已回写凭据到文件: {:?}", path);
@@ -2093,6 +2099,7 @@ impl Drop for MultiTokenManager {
 mod tests {
     use super::*;
     use crate::kiro::endpoint::IdeEndpoint;
+    use crate::kiro::model::credentials::CredentialsConfig;
     use std::collections::HashMap;
 
     /// 测试用：构造仅含 IDE 端点的默认 registry
@@ -2100,6 +2107,21 @@ mod tests {
         let mut map: HashMap<String, Arc<dyn KiroEndpoint>> = HashMap::new();
         map.insert("ide".to_string(), Arc::new(IdeEndpoint::new()));
         Arc::new(EndpointRegistry::new(map, "ide".to_string()).unwrap())
+    }
+
+    fn temp_credentials_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "kiro-credentials-{name}-{}.json",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    fn api_key_credential(key: &str) -> KiroCredentials {
+        KiroCredentials {
+            auth_method: Some("api_key".to_string()),
+            kiro_api_key: Some(key.to_string()),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -2245,6 +2267,172 @@ mod tests {
         assert!(id > 0);
         assert_eq!(manager.total_count(), 1);
         assert_eq!(manager.available_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_single_credentials_file_add_persists_as_multiple() {
+        let path = temp_credentials_path("single-add");
+        std::fs::write(
+            &path,
+            r#"{"authMethod":"api_key","kiroApiKey":"ksk_existing_key"}"#,
+        )
+        .unwrap();
+
+        let config = Config::default();
+        let credentials_config = CredentialsConfig::load(&path).unwrap();
+        assert!(!credentials_config.is_multiple());
+        let credentials = credentials_config.into_sorted_credentials();
+        let manager = MultiTokenManager::new(
+            config,
+            credentials,
+            None,
+            Some(path.clone()),
+            false,
+            test_registry(),
+        )
+        .unwrap();
+
+        manager
+            .add_credential(api_key_credential("ksk_added_key"))
+            .await
+            .unwrap();
+
+        match CredentialsConfig::load(&path).unwrap() {
+            CredentialsConfig::Multiple(credentials) => {
+                assert_eq!(credentials.len(), 2);
+                assert!(
+                    credentials
+                        .iter()
+                        .any(|c| c.kiro_api_key.as_deref() == Some("ksk_existing_key"))
+                );
+                assert!(
+                    credentials
+                        .iter()
+                        .any(|c| c.kiro_api_key.as_deref() == Some("ksk_added_key"))
+                );
+            }
+            CredentialsConfig::Single(_) => panic!("新增第二个账号后应迁移为数组格式"),
+        }
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_single_credentials_file_update_persists_without_migrating() {
+        let path = temp_credentials_path("single-update");
+        std::fs::write(
+            &path,
+            r#"{"authMethod":"api_key","kiroApiKey":"ksk_existing_key"}"#,
+        )
+        .unwrap();
+
+        let config = Config::default();
+        let credentials_config = CredentialsConfig::load(&path).unwrap();
+        let credentials = credentials_config.into_sorted_credentials();
+        let manager = MultiTokenManager::new(
+            config,
+            credentials,
+            None,
+            Some(path.clone()),
+            false,
+            test_registry(),
+        )
+        .unwrap();
+
+        manager.set_priority(1, 42).unwrap();
+
+        match CredentialsConfig::load(&path).unwrap() {
+            CredentialsConfig::Single(credential) => {
+                assert_eq!(credential.priority, 42);
+                assert_eq!(credential.kiro_api_key.as_deref(), Some("ksk_existing_key"));
+            }
+            CredentialsConfig::Multiple(_) => panic!("单账号更新不应迁移为数组格式"),
+        }
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_multiple_credentials_file_delete_keeps_array_format() {
+        let path = temp_credentials_path("multiple-delete");
+        std::fs::write(
+            &path,
+            r#"[
+  {"id":1,"authMethod":"api_key","kiroApiKey":"ksk_first_key"},
+  {"id":2,"authMethod":"api_key","kiroApiKey":"ksk_second_key"}
+]"#,
+        )
+        .unwrap();
+
+        let config = Config::default();
+        let credentials_config = CredentialsConfig::load(&path).unwrap();
+        assert!(credentials_config.is_multiple());
+        let credentials = credentials_config.into_sorted_credentials();
+        let manager = MultiTokenManager::new(
+            config,
+            credentials,
+            None,
+            Some(path.clone()),
+            true,
+            test_registry(),
+        )
+        .unwrap();
+
+        manager.set_disabled(2, true).unwrap();
+        manager.delete_credential(2).unwrap();
+
+        match CredentialsConfig::load(&path).unwrap() {
+            CredentialsConfig::Multiple(credentials) => {
+                assert_eq!(credentials.len(), 1);
+                assert_eq!(credentials[0].id, Some(1));
+            }
+            CredentialsConfig::Single(_) => panic!("数组格式删除到单账号后应保持数组格式"),
+        }
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_migrated_credentials_file_stays_multiple_after_delete() {
+        let path = temp_credentials_path("single-migrate-delete");
+        std::fs::write(
+            &path,
+            r#"{"authMethod":"api_key","kiroApiKey":"ksk_existing_key"}"#,
+        )
+        .unwrap();
+
+        let config = Config::default();
+        let credentials_config = CredentialsConfig::load(&path).unwrap();
+        let credentials = credentials_config.into_sorted_credentials();
+        let manager = MultiTokenManager::new(
+            config,
+            credentials,
+            None,
+            Some(path.clone()),
+            false,
+            test_registry(),
+        )
+        .unwrap();
+
+        let added_id = manager
+            .add_credential(api_key_credential("ksk_added_key"))
+            .await
+            .unwrap();
+        manager.set_disabled(added_id, true).unwrap();
+        manager.delete_credential(added_id).unwrap();
+
+        match CredentialsConfig::load(&path).unwrap() {
+            CredentialsConfig::Multiple(credentials) => {
+                assert_eq!(credentials.len(), 1);
+                assert_eq!(
+                    credentials[0].kiro_api_key.as_deref(),
+                    Some("ksk_existing_key")
+                );
+            }
+            CredentialsConfig::Single(_) => panic!("迁移为数组后不应退回单对象格式"),
+        }
+
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[tokio::test]

@@ -49,7 +49,7 @@ async fn main() {
         std::process::exit(1);
     });
 
-    // 判断是否为多凭据格式（用于刷新后回写）
+    // 记录凭据文件启动格式，后续写回可按需从单对象迁移为数组
     let is_multiple_format = credentials_config.is_multiple();
 
     // 转换为按优先级排序的凭据列表

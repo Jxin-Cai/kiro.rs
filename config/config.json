@@ -15,5 +15,8 @@
   "proxyUsername": null,
   "proxyPassword": null,
   "adminApiKey": "sk-caijiaxin123",
-  "loadBalancingMode": "priority"
+  "loadBalancingMode": "priority",
+  "extractThinking": true,
+  "defaultEndpoint": "ide",
+  "endpoints": {}
 }

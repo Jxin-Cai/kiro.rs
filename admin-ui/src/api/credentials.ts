@@ -11,6 +11,16 @@ import type {
   CredentialsQuery,
   CredentialModelsResponse,
   SetSupportedModelsRequest,
+  GroupRecord,
+  CreateGroupRequest,
+  UpdateGroupRequest,
+  SetAccountGroupsRequest,
+  ApiKeyRecord,
+  CreateApiKeyRequest,
+  UpdateApiKeyRequest,
+  CreateApiKeyResponse,
+  UsageLogsQuery,
+  UsageLogsResponse,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -123,6 +133,79 @@ export async function exportCredentials(
 // 删除凭据
 export async function deleteCredential(id: number): Promise<SuccessResponse> {
   const { data } = await api.delete<SuccessResponse>(`/credentials/${id}`)
+  return data
+}
+
+export async function setAccountGroups(
+  id: number,
+  groupIds: number[]
+): Promise<CredentialsStatusResponse> {
+  const { data } = await api.post<CredentialsStatusResponse>(
+    `/credentials/${id}/groups`,
+    { groupIds } as SetAccountGroupsRequest
+  )
+  return data
+}
+
+export async function listGroups(): Promise<GroupRecord[]> {
+  const { data } = await api.get<GroupRecord[]>('/groups')
+  return data
+}
+
+export async function createGroup(req: CreateGroupRequest): Promise<GroupRecord> {
+  const { data } = await api.post<GroupRecord>('/groups', req)
+  return data
+}
+
+export async function updateGroup(
+  id: number,
+  req: UpdateGroupRequest
+): Promise<GroupRecord> {
+  const { data } = await api.post<GroupRecord>(`/groups/${id}`, req)
+  return data
+}
+
+export async function deleteGroup(id: number): Promise<SuccessResponse> {
+  const { data } = await api.delete<SuccessResponse>(`/groups/${id}`)
+  return data
+}
+
+export async function listApiKeys(): Promise<ApiKeyRecord[]> {
+  const { data } = await api.get<ApiKeyRecord[]>('/api-keys')
+  return data
+}
+
+export async function createApiKey(
+  req: CreateApiKeyRequest
+): Promise<CreateApiKeyResponse> {
+  const { data } = await api.post<CreateApiKeyResponse>('/api-keys', req)
+  return data
+}
+
+export async function updateApiKey(
+  id: number,
+  req: UpdateApiKeyRequest
+): Promise<ApiKeyRecord> {
+  const { data } = await api.post<ApiKeyRecord>(`/api-keys/${id}`, req)
+  return data
+}
+
+export async function deleteApiKey(id: number): Promise<SuccessResponse> {
+  const { data } = await api.delete<SuccessResponse>(`/api-keys/${id}`)
+  return data
+}
+
+export async function rotateApiKey(id: number): Promise<CreateApiKeyResponse> {
+  const { data } = await api.post<CreateApiKeyResponse>(`/api-keys/${id}/rotate`)
+  return data
+}
+
+export async function listUsageLogs(
+  query?: UsageLogsQuery
+): Promise<UsageLogsResponse> {
+  const { data } = await api.get<UsageLogsResponse>('/usage-logs', {
+    params: query,
+  })
   return data
 }
 

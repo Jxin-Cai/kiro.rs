@@ -21,6 +21,7 @@ import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
+import { AdminTabButton, ApiKeysPanel, GroupsPanel, UsageLogsPanel } from '@/components/admin-management-panels'
 import { useCredentials, useDeleteCredential, useResetFailure, useSetDisabled, useLoadBalancingMode, useSetLoadBalancingMode } from '@/hooks/use-credentials'
 import { getCredentialBalance, forceRefreshToken, exportCredentials } from '@/api/credentials'
 import {
@@ -34,6 +35,8 @@ import {
 } from '@/lib/credential-status'
 import { extractErrorMessage } from '@/lib/utils'
 import type { BalanceResponse, CredentialStatusItem } from '@/types/api'
+
+type AdminTab = 'accounts' | 'groups' | 'apiKeys' | 'usageLogs'
 
 interface DashboardProps {
   onLogout: () => void
@@ -106,6 +109,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [endpointFilter, setEndpointFilter] = useState('all')
   const [sortKey, setSortKey] = useState<CredentialSortKey>('priority')
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
+  const [activeTab, setActiveTab] = useState<AdminTab>('accounts')
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
       return document.documentElement.classList.contains('dark')
@@ -1045,7 +1049,19 @@ export function Dashboard({ onLogout }: DashboardProps) {
           </CardContent>
         </Card>
 
+        <div className="mb-4 flex shrink-0 flex-wrap gap-2 rounded-lg border bg-card p-1">
+          <AdminTabButton active={activeTab === 'accounts'} onClick={() => setActiveTab('accounts')}>账号池</AdminTabButton>
+          <AdminTabButton active={activeTab === 'groups'} onClick={() => setActiveTab('groups')}>分组</AdminTabButton>
+          <AdminTabButton active={activeTab === 'apiKeys'} onClick={() => setActiveTab('apiKeys')}>API Keys</AdminTabButton>
+          <AdminTabButton active={activeTab === 'usageLogs'} onClick={() => setActiveTab('usageLogs')}>使用日志</AdminTabButton>
+        </div>
+
+        {activeTab === 'groups' && <GroupsPanel />}
+        {activeTab === 'apiKeys' && <ApiKeysPanel />}
+        {activeTab === 'usageLogs' && <UsageLogsPanel />}
+
         {/* 凭据列表 */}
+        {activeTab === 'accounts' && (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-4">
           <PoolToolbar
             totalCount={totalCredentialCount}
@@ -1182,6 +1198,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
           )}
           </div>
         </div>
+        )}
       </main>
 
       {/* 余额对话框 */}

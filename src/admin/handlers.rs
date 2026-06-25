@@ -9,8 +9,10 @@ use axum::{
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, CredentialsQuery, ExportCredentialsRequest, SetDisabledRequest,
-        SetLoadBalancingModeRequest, SetPriorityRequest, SetSupportedModelsRequest, SuccessResponse,
+        AddCredentialRequest, CreateApiKeyRequest, CreateGroupRequest, CredentialsQuery,
+        ExportCredentialsRequest, SetAccountGroupsRequest, SetDisabledRequest,
+        SetLoadBalancingModeRequest, SetPriorityRequest, SetSupportedModelsRequest,
+        SuccessResponse, UpdateApiKeyRequest, UpdateGroupRequest, UsageLogsQuery,
     },
 };
 
@@ -160,6 +162,117 @@ pub async fn force_refresh_token(
             id
         )))
         .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+pub async fn list_api_keys(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.list_api_keys().await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+pub async fn create_api_key(
+    State(state): State<AdminState>,
+    Json(payload): Json<CreateApiKeyRequest>,
+) -> impl IntoResponse {
+    match state.service.create_api_key(payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+pub async fn update_api_key(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+    Json(payload): Json<UpdateApiKeyRequest>,
+) -> impl IntoResponse {
+    match state.service.update_api_key(id, payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+pub async fn delete_api_key(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match state.service.delete_api_key(id).await {
+        Ok(_) => Json(SuccessResponse::new(format!("API Key #{} 已删除", id))).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+pub async fn rotate_api_key(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match state.service.rotate_api_key(id).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+pub async fn list_groups(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.list_groups().await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+pub async fn create_group(
+    State(state): State<AdminState>,
+    Json(payload): Json<CreateGroupRequest>,
+) -> impl IntoResponse {
+    match state.service.create_group(payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+pub async fn update_group(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+    Json(payload): Json<UpdateGroupRequest>,
+) -> impl IntoResponse {
+    match state.service.update_group(id, payload).await {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+pub async fn delete_group(
+    State(state): State<AdminState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match state.service.delete_group(id).await {
+        Ok(_) => Json(SuccessResponse::new(format!("分组 #{} 已删除", id))).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+pub async fn set_account_groups(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<SetAccountGroupsRequest>,
+) -> impl IntoResponse {
+    match state
+        .service
+        .set_account_groups(id, payload.group_ids)
+        .await
+    {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+pub async fn list_usage_logs(
+    State(state): State<AdminState>,
+    Query(query): Query<UsageLogsQuery>,
+) -> impl IntoResponse {
+    match state.service.list_usage_logs(query).await {
+        Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }

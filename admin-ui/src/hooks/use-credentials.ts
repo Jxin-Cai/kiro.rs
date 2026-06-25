@@ -12,8 +12,27 @@ import {
   deleteCredential,
   getLoadBalancingMode,
   setLoadBalancingMode,
+  setAccountGroups,
+  listGroups,
+  createGroup,
+  updateGroup,
+  deleteGroup,
+  listApiKeys,
+  createApiKey,
+  updateApiKey,
+  deleteApiKey,
+  rotateApiKey,
+  listUsageLogs,
 } from '@/api/credentials'
-import type { AddCredentialRequest, CredentialsQuery } from '@/types/api'
+import type {
+  AddCredentialRequest,
+  CredentialsQuery,
+  CreateApiKeyRequest,
+  CreateGroupRequest,
+  UpdateApiKeyRequest,
+  UpdateGroupRequest,
+  UsageLogsQuery,
+} from '@/types/api'
 
 // 查询凭据列表
 export function useCredentials(query?: CredentialsQuery) {
@@ -141,5 +160,115 @@ export function useSetLoadBalancingMode() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['loadBalancingMode'] })
     },
+  })
+}
+
+export function useGroups() {
+  return useQuery({
+    queryKey: ['groups'],
+    queryFn: listGroups,
+  })
+}
+
+export function useCreateGroup() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (req: CreateGroupRequest) => createGroup(req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['groups'] })
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+export function useUpdateGroup() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, req }: { id: number; req: UpdateGroupRequest }) =>
+      updateGroup(id, req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['groups'] })
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+export function useDeleteGroup() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => deleteGroup(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['groups'] })
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] })
+    },
+  })
+}
+
+export function useSetAccountGroups() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, groupIds }: { id: number; groupIds: number[] }) =>
+      setAccountGroups(id, groupIds),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      queryClient.invalidateQueries({ queryKey: ['groups'] })
+    },
+  })
+}
+
+export function useApiKeys() {
+  return useQuery({
+    queryKey: ['apiKeys'],
+    queryFn: listApiKeys,
+  })
+}
+
+export function useCreateApiKey() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (req: CreateApiKeyRequest) => createApiKey(req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] })
+    },
+  })
+}
+
+export function useUpdateApiKey() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, req }: { id: number; req: UpdateApiKeyRequest }) =>
+      updateApiKey(id, req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] })
+    },
+  })
+}
+
+export function useDeleteApiKey() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => deleteApiKey(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] })
+    },
+  })
+}
+
+export function useRotateApiKey() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => rotateApiKey(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] })
+    },
+  })
+}
+
+export function useUsageLogs(query: UsageLogsQuery) {
+  return useQuery({
+    queryKey: ['usageLogs', query],
+    queryFn: () => listUsageLogs(query),
+    refetchInterval: 30000,
   })
 }

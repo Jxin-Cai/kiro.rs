@@ -28,10 +28,13 @@ import {
 } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/switch'
 import { StatusBadge } from '@/components/account-pool/status-badge'
+import { Badge } from '@/components/ui/badge'
 import {
   useDeleteCredential,
   useForceRefreshToken,
+  useGroups,
   useResetFailure,
+  useSetAccountGroups,
   useSetDisabled,
   useSetPriority,
 } from '@/hooks/use-credentials'
@@ -109,7 +112,10 @@ export function CredentialDetailSheet({
   onQueryBalance,
 }: CredentialDetailSheetProps) {
   const [priorityValue, setPriorityValue] = useState('')
+  const [selectedGroupIds, setSelectedGroupIds] = useState<Set<number>>(new Set())
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const { data: groups = [] } = useGroups()
+  const setAccountGroups = useSetAccountGroups()
   const setDisabled = useSetDisabled()
   const setPriority = useSetPriority()
   const resetFailure = useResetFailure()
@@ -118,6 +124,7 @@ export function CredentialDetailSheet({
 
   useEffect(() => {
     setPriorityValue(credential ? String(credential.priority) : '')
+    setSelectedGroupIds(new Set((credential?.groups || []).map(group => group.id)))
   }, [credential])
 
   if (!credential) {
@@ -165,6 +172,28 @@ export function CredentialDetailSheet({
       { id: credential.id, priority },
       {
         onSuccess: (res) => toast.success(res.message),
+        onError: (err) => toast.error('操作失败: ' + (err as Error).message),
+      }
+    )
+  }
+
+  const toggleGroup = (groupId: number) => {
+    setSelectedGroupIds(prev => {
+      const next = new Set(prev)
+      if (next.has(groupId)) {
+        next.delete(groupId)
+      } else {
+        next.add(groupId)
+      }
+      return next
+    })
+  }
+
+  const handleSaveGroups = () => {
+    setAccountGroups.mutate(
+      { id: credential.id, groupIds: Array.from(selectedGroupIds) },
+      {
+        onSuccess: () => toast.success('账号分组已更新'),
         onError: (err) => toast.error('操作失败: ' + (err as Error).message),
       }
     )
@@ -240,7 +269,12 @@ export function CredentialDetailSheet({
             </DetailSection>
 
             <DetailSection title="调度信息">
-              <DetailItem label="状态" value={health.label} />
+              <DetailItem label="状态" value={`${health.label} / ${credential.status}`} />
+              <DetailItem label="可调度" value={credential.schedulable ? '是' : '否'} />
+              <DetailItem label="临时冷却至" value={formatDateTime(credential.tempUnschedulableUntil ?? null)} />
+              <DetailItem label="冷却原因" value={credential.tempUnschedulableReason} />
+              <DetailItem label="限速解除时间" value={formatDateTime(credential.rateLimitResetAt ?? null)} />
+              <DetailItem label="过载解除时间" value={formatDateTime(credential.overloadUntil ?? null)} />
               <div className="space-y-1">
                 <div className="text-xs text-muted-foreground">启用状态</div>
                 <div className="flex items-center gap-2">
@@ -273,6 +307,38 @@ export function CredentialDetailSheet({
                     <Save className="h-4 w-4" />
                     保存
                   </Button>
+                </div>
+              </div>
+              <div className="col-span-2 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs text-muted-foreground">账号分组</div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleSaveGroups}
+                    disabled={setAccountGroups.isPending}
+                  >
+                    <Save className="h-4 w-4" />
+                    保存分组
+                  </Button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {groups.length === 0 ? (
+                    <span className="text-sm text-muted-foreground">暂无分组</span>
+                  ) : (
+                    groups.map(group => (
+                      <button
+                        key={group.id}
+                        type="button"
+                        onClick={() => toggleGroup(group.id)}
+                        className="rounded-full"
+                      >
+                        <Badge variant={selectedGroupIds.has(group.id) ? 'default' : 'outline'}>
+                          {group.name}
+                        </Badge>
+                      </button>
+                    ))
+                  )}
                 </div>
               </div>
             </DetailSection>

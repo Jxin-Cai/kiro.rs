@@ -11,7 +11,7 @@ use axum::{
 };
 
 use crate::common::auth;
-use crate::kiro::provider::KiroProvider;
+use crate::kiro::provider::{KiroProvider, RequestAuthContext};
 
 use super::types::ErrorResponse;
 
@@ -47,16 +47,55 @@ impl AppState {
 /// API Key 认证中间件
 pub async fn auth_middleware(
     State(state): State<AppState>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    match auth::extract_api_key(&request) {
-        Some(key) if auth::constant_time_eq(&key, &state.api_key) => next.run(request).await,
-        _ => {
-            let error = ErrorResponse::authentication_error();
-            (StatusCode::UNAUTHORIZED, Json(error)).into_response()
+    let Some(key) = auth::extract_api_key(&request) else {
+        let error = ErrorResponse::authentication_error();
+        return (StatusCode::UNAUTHORIZED, Json(error)).into_response();
+    };
+
+    if auth::constant_time_eq(&key, &state.api_key) {
+        let auth_context = if let Some(provider) = &state.kiro_provider {
+            if let Some(store) = provider.token_manager().account_store() {
+                match store.default_group_id().await {
+                    Ok(group_id) => RequestAuthContext {
+                        api_key_id: None,
+                        group_id: Some(group_id),
+                    },
+                    Err(err) => {
+                        tracing::warn!("查询默认账号组失败: {}", err);
+                        RequestAuthContext::default()
+                    }
+                }
+            } else {
+                RequestAuthContext::default()
+            }
+        } else {
+            RequestAuthContext::default()
+        };
+        request.extensions_mut().insert(auth_context);
+        return next.run(request).await;
+    }
+
+    if let Some(provider) = &state.kiro_provider {
+        if let Some(store) = provider.token_manager().account_store() {
+            match store.find_api_key(&key).await {
+                Ok(Some(record)) => {
+                    request.extensions_mut().insert(RequestAuthContext {
+                        api_key_id: Some(record.id),
+                        group_id: record.group_id,
+                    });
+                    return next.run(request).await;
+                }
+                Ok(None) => {}
+                Err(err) => tracing::warn!("查询客户端 API Key 失败: {}", err),
+            }
         }
     }
+
+    let error = ErrorResponse::authentication_error();
+    (StatusCode::UNAUTHORIZED, Json(error)).into_response()
 }
 
 /// CORS 中间件层

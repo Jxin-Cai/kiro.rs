@@ -121,7 +121,11 @@ pub enum EndpointErrorKind {
     BadRequest,
     /// 其他未分类 4xx（经 401/402/403 特殊分支处理后的剩余 4xx）：bail
     ClientError,
-    /// 408/429/5xx：瞬态错误，sleep + 重试，不禁用
+    /// 429 速率限制：设置 rate_limit_reset_at，切换账号重试
+    RateLimited,
+    /// 529 服务端过载：设置 overload_until，切换账号重试
+    Overloaded,
+    /// 408/其他 5xx：瞬态错误，sleep + 重试，不禁用
     Transient,
     /// 兜底：当作可重试瞬态错误
     Unknown,
@@ -161,7 +165,13 @@ pub trait KiroEndpoint: Send + Sync {
         if status == 400 {
             return EndpointErrorKind::BadRequest;
         }
-        if matches!(status, 408 | 429) || (500..600).contains(&status) {
+        if status == 429 {
+            return EndpointErrorKind::RateLimited;
+        }
+        if status == 529 {
+            return EndpointErrorKind::Overloaded;
+        }
+        if status == 408 || (500..600).contains(&status) {
             return EndpointErrorKind::Transient;
         }
         if (400..500).contains(&status) {

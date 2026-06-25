@@ -8,8 +8,13 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use crate::kiro::account_store::{
+    ApiKeyRecord, CreateApiKeyRequest, CreateApiKeyResponse, CreateGroupRequest, GroupRecord,
+    UpdateApiKeyRequest, UpdateGroupRequest, UsageLogsQuery, UsageLogsResponse,
+};
 use crate::kiro::endpoint::EndpointRegistry;
 use crate::kiro::model::credentials::KiroCredentials;
+use crate::kiro::postgres_account_store::PostgresAccountStore;
 use crate::kiro::token_manager::MultiTokenManager;
 
 use super::error::AdminServiceError;
@@ -94,6 +99,13 @@ impl AdminService {
                 disabled_reason: entry.disabled_reason,
                 endpoint: entry.endpoint.unwrap_or_else(|| default_endpoint.clone()),
                 supported_models: entry.supported_models,
+                groups: entry.groups,
+                schedulable: entry.schedulable,
+                status: entry.status,
+                temp_unschedulable_until: entry.temp_unschedulable_until,
+                temp_unschedulable_reason: entry.temp_unschedulable_reason,
+                rate_limit_reset_at: entry.rate_limit_reset_at,
+                overload_until: entry.overload_until,
             })
             .collect();
 
@@ -108,13 +120,34 @@ impl AdminService {
         };
         let page = query.page.max(1);
 
-        if let Some(search) = query.search.as_ref().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()) {
+        if let Some(search) = query
+            .search
+            .as_ref()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        {
             credentials.retain(|c| {
                 c.id.to_string().contains(&search)
-                    || c.email.as_deref().unwrap_or_default().to_lowercase().contains(&search)
-                    || c.masked_api_key.as_deref().unwrap_or_default().to_lowercase().contains(&search)
-                    || c.refresh_token_hash.as_deref().unwrap_or_default().to_lowercase().contains(&search)
-                    || c.api_key_hash.as_deref().unwrap_or_default().to_lowercase().contains(&search)
+                    || c.email
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&search)
+                    || c.masked_api_key
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&search)
+                    || c.refresh_token_hash
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&search)
+                    || c.api_key_hash
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(&search)
                     || c.endpoint.to_lowercase().contains(&search)
             });
         }
@@ -123,7 +156,11 @@ impl AdminService {
             credentials.retain(|c| match status {
                 "available" => !c.disabled,
                 "current" => c.is_current,
-                "problem" => c.failure_count > 0 || c.refresh_failure_count > 0 || c.disabled_reason.is_some(),
+                "problem" => {
+                    c.failure_count > 0
+                        || c.refresh_failure_count > 0
+                        || c.disabled_reason.is_some()
+                }
                 "disabled" => c.disabled,
                 _ => true,
             });
@@ -140,7 +177,10 @@ impl AdminService {
         let sort_key = query.sort_key.as_deref().unwrap_or("priority");
         credentials.sort_by(|a, b| {
             let ord = match sort_key {
-                "status" => a.disabled.cmp(&b.disabled).then(a.failure_count.cmp(&b.failure_count)),
+                "status" => a
+                    .disabled
+                    .cmp(&b.disabled)
+                    .then(a.failure_count.cmp(&b.failure_count)),
                 "email" => a.email.cmp(&b.email).then(a.id.cmp(&b.id)),
                 "failures" => (a.failure_count + a.refresh_failure_count)
                     .cmp(&(b.failure_count + b.refresh_failure_count))
@@ -161,7 +201,11 @@ impl AdminService {
         let total_pages = total_items.div_ceil(page_size).max(1);
         let page = page.min(total_pages);
         let start = (page - 1) * page_size;
-        let credentials = credentials.into_iter().skip(start).take(page_size).collect();
+        let credentials = credentials
+            .into_iter()
+            .skip(start)
+            .take(page_size)
+            .collect();
 
         Ok(CredentialsStatusResponse {
             total: snapshot.total,
@@ -363,6 +407,8 @@ impl AdminService {
             kiro_api_key: req.kiro_api_key,
             endpoint: req.endpoint,
             supported_models: req.supported_models,
+            temp_unschedulable_enabled: false,
+            temp_unschedulable_rules: Vec::new(),
         };
 
         // 调用 token_manager 添加凭据
@@ -452,6 +498,113 @@ impl AdminService {
         Ok(())
     }
 
+    pub async fn list_api_keys(&self) -> Result<Vec<ApiKeyRecord>, AdminServiceError> {
+        self.account_store()?
+            .list_api_keys()
+            .await
+            .map_err(db_error)
+    }
+
+    pub async fn create_api_key(
+        &self,
+        req: CreateApiKeyRequest,
+    ) -> Result<CreateApiKeyResponse, AdminServiceError> {
+        self.account_store()?
+            .create_api_key(req)
+            .await
+            .map_err(db_error)
+    }
+
+    pub async fn update_api_key(
+        &self,
+        id: i64,
+        req: UpdateApiKeyRequest,
+    ) -> Result<ApiKeyRecord, AdminServiceError> {
+        self.account_store()?
+            .update_api_key(id, req)
+            .await
+            .map_err(db_error)
+    }
+
+    pub async fn delete_api_key(&self, id: i64) -> Result<(), AdminServiceError> {
+        self.account_store()?
+            .delete_api_key(id)
+            .await
+            .map_err(db_error)
+    }
+
+    pub async fn rotate_api_key(&self, id: i64) -> Result<CreateApiKeyResponse, AdminServiceError> {
+        self.account_store()?
+            .rotate_api_key(id)
+            .await
+            .map_err(db_error)
+    }
+
+    pub async fn list_groups(&self) -> Result<Vec<GroupRecord>, AdminServiceError> {
+        self.account_store()?.list_groups().await.map_err(db_error)
+    }
+
+    pub async fn create_group(
+        &self,
+        req: CreateGroupRequest,
+    ) -> Result<GroupRecord, AdminServiceError> {
+        self.account_store()?
+            .create_group(req)
+            .await
+            .map_err(db_error)
+    }
+
+    pub async fn update_group(
+        &self,
+        id: i64,
+        req: UpdateGroupRequest,
+    ) -> Result<GroupRecord, AdminServiceError> {
+        self.account_store()?
+            .update_group(id, req)
+            .await
+            .map_err(db_error)
+    }
+
+    pub async fn delete_group(&self, id: i64) -> Result<(), AdminServiceError> {
+        self.account_store()?
+            .delete_group(id)
+            .await
+            .map_err(db_error)
+    }
+
+    pub async fn set_account_groups(
+        &self,
+        account_id: u64,
+        group_ids: Vec<i64>,
+    ) -> Result<SuccessResponse, AdminServiceError> {
+        let store = self.account_store()?;
+        store
+            .set_account_groups(account_id, &group_ids)
+            .await
+            .map_err(db_error)?;
+        let groups = store
+            .get_account_groups(account_id)
+            .await
+            .map_err(db_error)?;
+        self.token_manager
+            .update_account_groups(account_id, groups)
+            .map_err(|e| self.classify_error(e, account_id))?;
+        Ok(SuccessResponse::new(format!(
+            "凭据 #{} 分组已更新",
+            account_id
+        )))
+    }
+
+    pub async fn list_usage_logs(
+        &self,
+        query: UsageLogsQuery,
+    ) -> Result<UsageLogsResponse, AdminServiceError> {
+        self.account_store()?
+            .list_usage_logs(query)
+            .await
+            .map_err(db_error)
+    }
+
     /// 获取负载均衡模式
     pub fn get_load_balancing_mode(&self) -> LoadBalancingModeResponse {
         LoadBalancingModeResponse {
@@ -484,6 +637,12 @@ impl AdminService {
             .force_refresh_token_for(id)
             .await
             .map_err(|e| self.classify_balance_error(e, id))
+    }
+
+    fn account_store(&self) -> Result<Arc<PostgresAccountStore>, AdminServiceError> {
+        self.token_manager
+            .account_store()
+            .ok_or_else(|| AdminServiceError::InternalError("数据库账号存储未启用".to_string()))
     }
 
     // ============ 余额缓存持久化 ============
@@ -644,5 +803,14 @@ impl AdminService {
         } else {
             AdminServiceError::InternalError(msg)
         }
+    }
+}
+
+fn db_error(e: anyhow::Error) -> AdminServiceError {
+    let msg = e.to_string();
+    if msg.contains("不存在") {
+        AdminServiceError::InvalidCredential(msg)
+    } else {
+        AdminServiceError::InternalError(msg)
     }
 }

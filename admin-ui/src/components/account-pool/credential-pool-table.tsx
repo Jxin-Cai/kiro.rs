@@ -12,6 +12,7 @@ import {
   Wallet,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -78,6 +79,34 @@ interface CredentialRowProps {
   onOpenDetails: (id: number) => void
   onViewBalance: (id: number) => void
   onOpenModels: (id: number) => void
+}
+
+function formatTempCooldown(value?: string | null) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+function CredentialGroups({ credential }: { credential: CredentialStatusItem }) {
+  if (!credential.groups || credential.groups.length === 0) {
+    return <span className="text-xs text-muted-foreground">未分组</span>
+  }
+
+  return (
+    <div className="flex flex-wrap gap-1">
+      {credential.groups.slice(0, 3).map(group => (
+        <Badge key={group.id} variant="secondary" className="max-w-24 truncate px-1.5 py-0 text-[10px]">
+          {group.name}
+        </Badge>
+      ))}
+      {credential.groups.length > 3 && (
+        <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+          +{credential.groups.length - 3}
+        </Badge>
+      )}
+    </div>
+  )
 }
 
 function CredentialRow({
@@ -193,10 +222,31 @@ function CredentialRow({
             >
               {getCredentialSecondaryText(credential)}
             </div>
+            <CredentialGroups credential={credential} />
           </div>
         </td>
         <td className="w-28 px-3 py-3 align-middle">
-          <StatusBadge health={health} />
+          <div className="flex flex-col gap-1">
+            <StatusBadge health={health} />
+            {!credential.schedulable && !credential.disabled && (
+              <Badge variant="warning" className="w-fit px-1.5 py-0 text-[10px]">不可调度</Badge>
+            )}
+            {credential.tempUnschedulableUntil && (
+              <span className="text-[10px] text-muted-foreground" title={credential.tempUnschedulableReason || undefined}>
+                临时冷却至 {formatTempCooldown(credential.tempUnschedulableUntil)}
+              </span>
+            )}
+            {credential.rateLimitResetAt && (
+              <span className="text-[10px] text-muted-foreground">
+                限速至 {formatTempCooldown(credential.rateLimitResetAt)}
+              </span>
+            )}
+            {credential.overloadUntil && (
+              <span className="text-[10px] text-muted-foreground">
+                过载至 {formatTempCooldown(credential.overloadUntil)}
+              </span>
+            )}
+          </div>
         </td>
         <td className="w-36 px-3 py-3 align-middle">
           <div className="flex min-w-0 flex-col gap-1 text-sm">

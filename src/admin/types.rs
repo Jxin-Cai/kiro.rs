@@ -2,6 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::kiro::account_store::{
+    ApiKeyRecord, CreateApiKeyRequest, CreateApiKeyResponse, CreateGroupRequest, GroupRecord,
+    GroupSummary, SetAccountGroupsRequest, UpdateApiKeyRequest, UpdateGroupRequest, UsageLogsQuery,
+    UsageLogsResponse,
+};
+
 // ============ 凭据状态 ============
 
 /// 凭据分页查询参数
@@ -106,6 +112,20 @@ pub struct CredentialStatusItem {
     pub endpoint: String,
     /// 账号允许路由的模型列表，空列表表示不限制
     pub supported_models: Vec<String>,
+    /// 账号所属分组
+    pub groups: Vec<GroupSummary>,
+    /// 是否可被调度
+    pub schedulable: bool,
+    /// 账号状态
+    pub status: String,
+    /// 临时冷却到期时间
+    pub temp_unschedulable_until: Option<String>,
+    /// 临时冷却原因
+    pub temp_unschedulable_reason: Option<String>,
+    /// 速率限制解除时间
+    pub rate_limit_reset_at: Option<String>,
+    /// 过载状态解除时间
+    pub overload_until: Option<String>,
 }
 
 // ============ 操作请求 ============

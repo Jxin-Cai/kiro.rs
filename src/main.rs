@@ -2,6 +2,7 @@ mod admin;
 mod admin_ui;
 mod anthropic;
 mod common;
+mod db;
 mod http_client;
 mod kiro;
 mod model;
@@ -13,6 +14,7 @@ use std::sync::Arc;
 use clap::Parser;
 use kiro::endpoint::{EndpointRegistry, IdeEndpoint, KiroEndpoint};
 use kiro::model::credentials::{CredentialsConfig, KiroCredentials};
+use kiro::postgres_account_store::PostgresAccountStore;
 use kiro::provider::KiroProvider;
 use kiro::token_manager::MultiTokenManager;
 use model::arg::Args;
@@ -110,6 +112,23 @@ async fn main() {
             std::process::exit(1);
         });
 
+    let credentials_path_buf = std::path::PathBuf::from(&credentials_path);
+    let db_pool = db::init_database(&config, &credentials_path_buf, &credentials_list)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("初始化数据库失败: {}", e);
+            std::process::exit(1);
+        });
+    let account_store = Arc::new(PostgresAccountStore::new(db_pool));
+    let account_records = account_store.load_accounts().await.unwrap_or_else(|e| {
+        tracing::error!("从数据库加载账号失败: {}", e);
+        std::process::exit(1);
+    });
+    credentials_list = account_records
+        .iter()
+        .map(|record| record.credentials.clone())
+        .collect();
+
     // 严格校验所有凭据声明的端点都已注册（保持原启动时错误语义）
     for cred in &credentials_list {
         let name = cred.endpoint.as_deref().unwrap_or(&config.default_endpoint);
@@ -129,13 +148,14 @@ async fn main() {
     let endpoint_registry = Arc::new(endpoint_registry);
 
     // 创建 MultiTokenManager 和 KiroProvider
-    let token_manager = MultiTokenManager::new(
+    let token_manager = MultiTokenManager::new_with_account_records(
         config.clone(),
-        credentials_list,
+        account_records,
         proxy_config.clone(),
-        Some(credentials_path.into()),
+        Some(credentials_path_buf),
         is_multiple_format,
         Arc::clone(&endpoint_registry),
+        Some(Arc::clone(&account_store)),
     )
     .unwrap_or_else(|e| {
         tracing::error!("创建 Token 管理器失败: {}", e);

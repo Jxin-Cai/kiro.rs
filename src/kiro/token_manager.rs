@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::http_client::{ProxyConfig, build_client};
+use crate::kiro::account_store::{AccountRecord, GroupSummary};
 use crate::kiro::endpoint::{
     EndpointRegistry, KiroEndpoint, KiroRequest, RequestContext, extract_next_token,
 };
@@ -30,6 +31,7 @@ use crate::kiro::model::token_refresh::{
     IdcRefreshRequest, IdcRefreshResponse, RefreshRequest, RefreshResponse,
 };
 use crate::kiro::model::usage_limits::UsageLimitsResponse;
+use crate::kiro::postgres_account_store::PostgresAccountStore;
 use crate::model::config::Config;
 
 /// 检查 Token 是否在指定时间内过期
@@ -405,6 +407,7 @@ pub(crate) async fn get_usage_limits(
 // ============================================================================
 
 /// 单个凭据条目的状态
+#[derive(Clone)]
 struct CredentialEntry {
     /// 凭据唯一 ID
     id: u64,
@@ -422,6 +425,64 @@ struct CredentialEntry {
     success_count: u64,
     /// 最后一次 API 调用时间（RFC3339 格式）
     last_used_at: Option<String>,
+    /// 账号所属分组
+    groups: Vec<GroupSummary>,
+    /// 是否允许调度
+    schedulable: bool,
+    /// 账号状态
+    status: String,
+    /// 临时冷却到期时间
+    temp_unschedulable_until: Option<String>,
+    /// 临时冷却原因
+    temp_unschedulable_reason: Option<String>,
+    /// 速率限制解除时间
+    rate_limit_reset_at: Option<String>,
+    /// 过载状态解除时间
+    overload_until: Option<String>,
+}
+
+impl CredentialEntry {
+    fn is_schedulable_for(&self, model: Option<&str>, group_id: Option<i64>) -> bool {
+        if self.disabled || !self.schedulable || self.status != "active" {
+            return false;
+        }
+        if self.temp_unschedulable_active() {
+            return false;
+        }
+        if self.rate_limit_active() {
+            return false;
+        }
+        if self.overload_active() {
+            return false;
+        }
+        if let Some(group_id) = group_id {
+            if !self.groups.iter().any(|group| group.id == group_id) {
+                return false;
+            }
+        }
+        self.credentials.supports_model(model)
+    }
+
+    fn temp_unschedulable_active(&self) -> bool {
+        self.temp_unschedulable_until
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|until| until.with_timezone(&Utc) > Utc::now())
+    }
+
+    fn rate_limit_active(&self) -> bool {
+        self.rate_limit_reset_at
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|until| until.with_timezone(&Utc) > Utc::now())
+    }
+
+    fn overload_active(&self) -> bool {
+        self.overload_until
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|until| until.with_timezone(&Utc) > Utc::now())
+    }
 }
 
 /// 禁用原因
@@ -439,6 +500,29 @@ enum DisabledReason {
     InvalidRefreshToken,
     /// 凭据配置无效（如 authMethod=api_key 但缺少 kiroApiKey）
     InvalidConfig,
+}
+
+fn disabled_reason_label(reason: DisabledReason) -> &'static str {
+    match reason {
+        DisabledReason::Manual => "Manual",
+        DisabledReason::TooManyFailures => "TooManyFailures",
+        DisabledReason::TooManyRefreshFailures => "TooManyRefreshFailures",
+        DisabledReason::QuotaExceeded => "QuotaExceeded",
+        DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
+        DisabledReason::InvalidConfig => "InvalidConfig",
+    }
+}
+
+fn disabled_reason_from_label(value: &str) -> Option<DisabledReason> {
+    match value {
+        "Manual" => Some(DisabledReason::Manual),
+        "TooManyFailures" => Some(DisabledReason::TooManyFailures),
+        "TooManyRefreshFailures" => Some(DisabledReason::TooManyRefreshFailures),
+        "QuotaExceeded" => Some(DisabledReason::QuotaExceeded),
+        "InvalidRefreshToken" => Some(DisabledReason::InvalidRefreshToken),
+        "InvalidConfig" => Some(DisabledReason::InvalidConfig),
+        _ => None,
+    }
 }
 
 /// 统计数据持久化条目
@@ -497,6 +581,20 @@ pub struct CredentialEntrySnapshot {
     pub endpoint: Option<String>,
     /// 账号允许路由的模型列表，空列表表示不限制
     pub supported_models: Vec<String>,
+    /// 账号所属分组
+    pub groups: Vec<GroupSummary>,
+    /// 是否可调度
+    pub schedulable: bool,
+    /// 账号状态
+    pub status: String,
+    /// 临时冷却到期时间
+    pub temp_unschedulable_until: Option<String>,
+    /// 临时冷却原因
+    pub temp_unschedulable_reason: Option<String>,
+    /// 速率限制解除时间
+    pub rate_limit_reset_at: Option<String>,
+    /// 过载状态解除时间
+    pub overload_until: Option<String>,
 }
 
 /// 凭据管理器状态快照
@@ -538,6 +636,8 @@ pub struct MultiTokenManager {
     stats_dirty: AtomicBool,
     /// 端点注册表（用于在 CallContext 中预解析 endpoint）
     endpoint_registry: Arc<EndpointRegistry>,
+    /// SQLite 账号存储（启用数据库模式时存在）
+    account_store: Option<Arc<PostgresAccountStore>>,
 }
 
 /// 每个凭据最大 API 调用失败次数
@@ -613,44 +713,91 @@ impl MultiTokenManager {
         credentials_path: Option<PathBuf>,
         is_multiple_format: bool,
         endpoint_registry: Arc<EndpointRegistry>,
+        account_store: Option<Arc<PostgresAccountStore>>,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_account_records(
+            config,
+            credentials.into_iter().map(AccountRecord::from).collect(),
+            proxy,
+            credentials_path,
+            is_multiple_format,
+            endpoint_registry,
+            account_store,
+        )
+    }
+
+    pub fn new_with_account_records(
+        config: Config,
+        records: Vec<AccountRecord>,
+        proxy: Option<ProxyConfig>,
+        credentials_path: Option<PathBuf>,
+        is_multiple_format: bool,
+        endpoint_registry: Arc<EndpointRegistry>,
+        account_store: Option<Arc<PostgresAccountStore>>,
     ) -> anyhow::Result<Self> {
         // 计算当前最大 ID，为没有 ID 的凭据分配新 ID
-        let max_existing_id = credentials.iter().filter_map(|c| c.id).max().unwrap_or(0);
+        let max_existing_id = records
+            .iter()
+            .filter_map(|r| r.credentials.id)
+            .max()
+            .unwrap_or(0);
         let mut next_id = max_existing_id + 1;
         let mut has_new_ids = false;
         let mut has_new_machine_ids = false;
         let config_ref = &config;
 
-        let entries: Vec<CredentialEntry> = credentials
+        let entries: Vec<CredentialEntry> = records
             .into_iter()
-            .map(|mut cred| {
-                cred.canonicalize_auth_method();
-                cred.canonicalize_supported_models();
-                let id = cred.id.unwrap_or_else(|| {
+            .map(|mut record| {
+                record.credentials.canonicalize_auth_method();
+                record.credentials.canonicalize_supported_models();
+                let id = record.credentials.id.unwrap_or_else(|| {
                     let id = next_id;
                     next_id += 1;
-                    cred.id = Some(id);
+                    record.credentials.id = Some(id);
                     has_new_ids = true;
                     id
                 });
-                if cred.machine_id.is_none() {
-                    cred.machine_id =
-                        Some(machine_id::generate_from_credentials(&cred, config_ref));
+                if record.credentials.machine_id.is_none() {
+                    record.credentials.machine_id = Some(machine_id::generate_from_credentials(
+                        &record.credentials,
+                        config_ref,
+                    ));
                     has_new_machine_ids = true;
                 }
+                let disabled_reason = record
+                    .disabled_reason
+                    .as_deref()
+                    .and_then(disabled_reason_from_label)
+                    .or_else(|| {
+                        record
+                            .credentials
+                            .disabled
+                            .then_some(DisabledReason::Manual)
+                    });
                 CredentialEntry {
                     id,
-                    credentials: cred.clone(),
-                    failure_count: 0,
-                    refresh_failure_count: 0,
-                    disabled: cred.disabled, // 从配置文件读取 disabled 状态
-                    disabled_reason: if cred.disabled {
-                        Some(DisabledReason::Manual)
+                    credentials: record.credentials.clone(),
+                    failure_count: record.failure_count,
+                    refresh_failure_count: record.refresh_failure_count,
+                    disabled: record.disabled,
+                    disabled_reason,
+                    success_count: record.success_count,
+                    last_used_at: record.last_used_at.clone(),
+                    groups: if record.groups.is_empty() {
+                        vec![GroupSummary {
+                            id: 1,
+                            name: "default".to_string(),
+                        }]
                     } else {
-                        None
+                        record.groups.clone()
                     },
-                    success_count: 0,
-                    last_used_at: None,
+                    schedulable: record.schedulable,
+                    status: record.status.clone(),
+                    temp_unschedulable_until: record.temp_unschedulable_until.clone(),
+                    temp_unschedulable_reason: record.temp_unschedulable_reason.clone(),
+                    rate_limit_reset_at: record.rate_limit_reset_at.clone(),
+                    overload_until: record.overload_until.clone(),
                 }
             })
             .collect();
@@ -708,6 +855,7 @@ impl MultiTokenManager {
             last_stats_save_at: Mutex::new(None),
             stats_dirty: AtomicBool::new(false),
             endpoint_registry,
+            account_store,
         };
 
         // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
@@ -719,8 +867,9 @@ impl MultiTokenManager {
             }
         }
 
-        // 加载持久化的统计数据（success_count, last_used_at）
-        manager.load_stats();
+        if manager.account_store.is_none() {
+            manager.load_stats();
+        }
 
         Ok(manager)
     }
@@ -728,6 +877,10 @@ impl MultiTokenManager {
     /// 获取配置的引用
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    pub fn account_store(&self) -> Option<Arc<PostgresAccountStore>> {
+        self.account_store.as_ref().map(Arc::clone)
     }
 
     /// 获取凭据总数
@@ -747,13 +900,18 @@ impl MultiTokenManager {
     ///
     /// # 参数
     /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
-    fn select_next_credential(&self, model: Option<&str>) -> Option<(u64, KiroCredentials)> {
+    /// - `group_id`: 可选的账号组 ID，用于限制客户端 key 可调度的账号池
+    fn select_next_credential(
+        &self,
+        model: Option<&str>,
+        group_id: Option<i64>,
+    ) -> Option<(u64, KiroCredentials)> {
         let entries = self.entries.lock();
 
-        // 过滤可用且支持请求模型的凭据
+        // 过滤可调度、属于目标分组且支持请求模型的凭据
         let available: Vec<_> = entries
             .iter()
-            .filter(|e| !e.disabled && e.credentials.supports_model(model))
+            .filter(|e| e.is_schedulable_for(model, group_id))
             .collect();
 
         if available.is_empty() {
@@ -791,7 +949,12 @@ impl MultiTokenManager {
     ///
     /// # 参数
     /// - `model`: 可选的模型名称，用于过滤支持该模型的凭据（如 opus 模型需要付费订阅）
-    pub(crate) async fn acquire_context(&self, model: Option<&str>) -> anyhow::Result<CallContext> {
+    /// - `group_id`: 可选的账号组 ID，用于限制客户端 key 可调度的账号池
+    pub(crate) async fn acquire_context(
+        &self,
+        model: Option<&str>,
+        group_id: Option<i64>,
+    ) -> anyhow::Result<CallContext> {
         let total = self.total_count();
         let max_attempts = (total * MAX_FAILURES_PER_CREDENTIAL as usize).max(1);
         let mut attempt_count = 0;
@@ -817,9 +980,7 @@ impl MultiTokenManager {
                     let current_id = *self.current_id.lock();
                     entries
                         .iter()
-                        .find(|e| {
-                            e.id == current_id && !e.disabled && e.credentials.supports_model(model)
-                        })
+                        .find(|e| e.id == current_id && e.is_schedulable_for(model, group_id))
                         .map(|e| (e.id, e.credentials.clone()))
                 };
 
@@ -827,26 +988,33 @@ impl MultiTokenManager {
                     hit
                 } else {
                     // 当前凭据不可用或 balanced 模式，根据负载均衡策略选择
-                    let mut best = self.select_next_credential(model);
+                    let mut best = self.select_next_credential(model, group_id);
 
                     // 没有可用凭据：如果是"自动禁用导致全灭"，做一次类似重启的自愈
                     if best.is_none() {
                         let mut entries = self.entries.lock();
                         if entries.iter().any(|e| {
-                            e.disabled && e.disabled_reason == Some(DisabledReason::TooManyFailures)
+                            e.disabled
+                                && e.disabled_reason == Some(DisabledReason::TooManyFailures)
+                                && group_id
+                                    .is_none_or(|id| e.groups.iter().any(|group| group.id == id))
                         }) {
                             tracing::warn!(
                                 "所有凭据均已被自动禁用，执行自愈：重置失败计数并重新启用（等价于重启）"
                             );
                             for e in entries.iter_mut() {
-                                if e.disabled_reason == Some(DisabledReason::TooManyFailures) {
+                                if e.disabled_reason == Some(DisabledReason::TooManyFailures)
+                                    && group_id.is_none_or(|id| {
+                                        e.groups.iter().any(|group| group.id == id)
+                                    })
+                                {
                                     e.disabled = false;
                                     e.disabled_reason = None;
                                     e.failure_count = 0;
                                 }
                             }
                             drop(entries);
-                            best = self.select_next_credential(model);
+                            best = self.select_next_credential(model, group_id);
                         }
                     }
 
@@ -860,21 +1028,54 @@ impl MultiTokenManager {
                         // 注意：必须在 bail! 之前计算 available_count，
                         // 因为 available_count() 会尝试获取 entries 锁，
                         // 而此时我们已经持有该锁，会导致死锁
-                        let available = entries.iter().filter(|e| !e.disabled).count();
+                        let in_group = entries
+                            .iter()
+                            .filter(|e| {
+                                group_id
+                                    .is_none_or(|id| e.groups.iter().any(|group| group.id == id))
+                            })
+                            .count();
+                        let available = entries
+                            .iter()
+                            .filter(|e| {
+                                !e.disabled
+                                    && e.schedulable
+                                    && e.status == "active"
+                                    && !e.temp_unschedulable_active()
+                                    && group_id.is_none_or(|id| {
+                                        e.groups.iter().any(|group| group.id == id)
+                                    })
+                            })
+                            .count();
                         let model_supported = entries
                             .iter()
-                            .filter(|e| !e.disabled && e.credentials.supports_model(model))
+                            .filter(|e| e.is_schedulable_for(model, group_id))
                             .count();
+                        if group_id.is_some() && in_group == 0 {
+                            anyhow::bail!("账号组中没有可用凭据（group_id: {:?}）", group_id);
+                        }
                         if available > 0 && model_supported == 0 {
                             let model_label = model.unwrap_or("未知模型");
                             anyhow::bail!(
-                                "没有可用于模型 {} 的凭据（可用账号: {}/{}）",
+                                "没有可用于模型 {} 的凭据（可调度账号: {}/{}）",
                                 model_label,
                                 available,
                                 total
                             );
                         }
-                        anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
+                        let disabled = entries
+                            .iter()
+                            .filter(|e| {
+                                e.disabled
+                                    && group_id.is_none_or(|id| {
+                                        e.groups.iter().any(|group| group.id == id)
+                                    })
+                            })
+                            .count();
+                        if disabled == in_group {
+                            anyhow::bail!("所有凭据均已禁用（{}/{}）", available, total);
+                        }
+                        anyhow::bail!("所有凭据均不可调度（{}/{}）", available, total);
                     }
                 }
             };
@@ -1085,6 +1286,51 @@ impl MultiTokenManager {
         Ok(true)
     }
 
+    fn persist_entry_to_store(&self, entry: &CredentialEntry) {
+        let Some(store) = self.account_store.as_ref() else {
+            return;
+        };
+        let record = AccountRecord {
+            id: entry.id,
+            credentials: entry.credentials.clone(),
+            failure_count: entry.failure_count,
+            refresh_failure_count: entry.refresh_failure_count,
+            disabled: entry.disabled,
+            disabled_reason: entry
+                .disabled_reason
+                .map(|reason| disabled_reason_label(reason).to_string()),
+            success_count: entry.success_count,
+            last_used_at: entry.last_used_at.clone(),
+            schedulable: entry.schedulable && !entry.disabled,
+            status: if entry.disabled {
+                "disabled".to_string()
+            } else {
+                entry.status.clone()
+            },
+            temp_unschedulable_until: entry.temp_unschedulable_until.clone(),
+            temp_unschedulable_reason: entry.temp_unschedulable_reason.clone(),
+            rate_limit_reset_at: entry.rate_limit_reset_at.clone(),
+            overload_until: entry.overload_until.clone(),
+            groups: entry.groups.clone(),
+        };
+        let store = Arc::clone(store);
+        tokio::spawn(async move {
+            if let Err(err) = store.persist_account(&record).await {
+                tracing::warn!("同步账号 #{} 到数据库失败: {}", record.id, err);
+            }
+        });
+    }
+
+    fn persist_entry_by_id_to_store(&self, id: u64) {
+        let entry = {
+            let entries = self.entries.lock();
+            entries.iter().find(|entry| entry.id == id).cloned()
+        };
+        if let Some(entry) = entry {
+            self.persist_entry_to_store(&entry);
+        }
+    }
+
     /// 获取缓存目录（凭据文件所在目录）
     pub fn cache_dir(&self) -> Option<PathBuf> {
         self.credentials_path
@@ -1182,6 +1428,13 @@ impl MultiTokenManager {
         }
     }
 
+    fn persist_stats_or_store(&self) {
+        if self.account_store.is_some() {
+            return;
+        }
+        self.save_stats_debounced();
+    }
+
     /// 报告指定凭据 API 调用成功
     ///
     /// 重置该凭据的失败计数
@@ -1203,7 +1456,8 @@ impl MultiTokenManager {
                 );
             }
         }
-        self.save_stats_debounced();
+        self.persist_entry_by_id_to_store(id);
+        self.persist_stats_or_store();
     }
 
     /// 报告指定凭据 API 调用失败
@@ -1262,7 +1516,8 @@ impl MultiTokenManager {
 
             entries.iter().any(|e| !e.disabled)
         };
-        self.save_stats_debounced();
+        self.persist_entry_by_id_to_store(id);
+        self.persist_stats_or_store();
         result
     }
 
@@ -1312,8 +1567,68 @@ impl MultiTokenManager {
                 false
             }
         };
-        self.save_stats_debounced();
+        self.persist_entry_by_id_to_store(id);
+        self.persist_stats_or_store();
         result
+    }
+
+    /// 设置凭据临时不可调度冷却时间
+    pub fn set_temp_unschedulable(&self, id: u64, until: chrono::DateTime<Utc>, reason: String) {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            entry.temp_unschedulable_until = Some(until.to_rfc3339());
+            entry.temp_unschedulable_reason = Some(reason.clone());
+            let cooldown_seconds = (until - Utc::now()).num_seconds().max(0);
+            tracing::warn!(
+                "凭据 #{} 临时退出调度，冷却至 {}（{} 秒）：{}",
+                id,
+                until.format("%Y-%m-%d %H:%M:%S UTC"),
+                cooldown_seconds,
+                reason
+            );
+        }
+        drop(entries);
+        self.persist_entry_by_id_to_store(id);
+    }
+
+    /// 设置凭据速率限制冷却时间
+    ///
+    /// 当收到 429 错误时调用，设置 `rate_limit_reset_at` 并标记为不可调度，
+    /// 调度器会在解除时间前跳过该账号。
+    pub fn set_rate_limit(&self, id: u64, reset_at: chrono::DateTime<Utc>) {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            entry.rate_limit_reset_at = Some(reset_at.to_rfc3339());
+            let cooldown_seconds = (reset_at - Utc::now()).num_seconds().max(0);
+            tracing::warn!(
+                "凭据 #{} 触发速率限制，冷却至 {}（{} 秒）",
+                id,
+                reset_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                cooldown_seconds
+            );
+        }
+        drop(entries);
+        self.persist_entry_by_id_to_store(id);
+    }
+
+    /// 设置凭据过载冷却时间
+    ///
+    /// 当收到 529 错误时调用，设置 `overload_until` 并标记为不可调度，
+    /// 调度器会在解除时间前跳过该账号。
+    pub fn set_overload(&self, id: u64, until: chrono::DateTime<Utc>) {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            entry.overload_until = Some(until.to_rfc3339());
+            let cooldown_seconds = (until - Utc::now()).num_seconds().max(0);
+            tracing::warn!(
+                "凭据 #{} 触发过载保护，冷却至 {}（{} 秒）",
+                id,
+                until.format("%Y-%m-%d %H:%M:%S UTC"),
+                cooldown_seconds
+            );
+        }
+        drop(entries);
+        self.persist_entry_by_id_to_store(id);
     }
 
     /// 报告指定凭据刷新 Token 失败。
@@ -1375,7 +1690,8 @@ impl MultiTokenManager {
                 false
             }
         };
-        self.save_stats_debounced();
+        self.persist_entry_by_id_to_store(id);
+        self.persist_stats_or_store();
         result
     }
 
@@ -1423,7 +1739,8 @@ impl MultiTokenManager {
                 false
             }
         };
-        self.save_stats_debounced();
+        self.persist_entry_by_id_to_store(id);
+        self.persist_stats_or_store();
         result
     }
 
@@ -1523,6 +1840,13 @@ impl MultiTokenManager {
                     }),
                     endpoint: e.credentials.endpoint.clone(),
                     supported_models: e.credentials.supported_models.clone(),
+                    groups: e.groups.clone(),
+                    schedulable: e.schedulable,
+                    status: e.status.clone(),
+                    temp_unschedulable_until: e.temp_unschedulable_until.clone(),
+                    temp_unschedulable_reason: e.temp_unschedulable_reason.clone(),
+                    rate_limit_reset_at: e.rate_limit_reset_at.clone(),
+                    overload_until: e.overload_until.clone(),
                 })
                 .collect(),
             current_id,
@@ -1580,8 +1904,10 @@ impl MultiTokenManager {
                 entry.disabled_reason = Some(DisabledReason::Manual);
             }
         }
-        // 持久化更改
-        self.persist_credentials()?;
+        self.persist_entry_by_id_to_store(id);
+        if self.account_store.is_none() {
+            self.persist_credentials()?;
+        }
         Ok(())
     }
 
@@ -1600,8 +1926,10 @@ impl MultiTokenManager {
         }
         // 立即按新优先级重新选择当前凭据（无论持久化是否成功）
         self.select_highest_priority();
-        // 持久化更改
-        self.persist_credentials()?;
+        self.persist_entry_by_id_to_store(id);
+        if self.account_store.is_none() {
+            self.persist_credentials()?;
+        }
         Ok(())
     }
 
@@ -1621,8 +1949,10 @@ impl MultiTokenManager {
             entry.disabled = false;
             entry.disabled_reason = None;
         }
-        // 持久化更改
-        self.persist_credentials()?;
+        self.persist_entry_by_id_to_store(id);
+        if self.account_store.is_none() {
+            self.persist_credentials()?;
+        }
         Ok(())
     }
 
@@ -1641,7 +1971,10 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
             entry.credentials.supported_models = models.clone();
         }
-        self.persist_credentials()?;
+        self.persist_entry_by_id_to_store(id);
+        if self.account_store.is_none() {
+            self.persist_credentials()?;
+        }
         Ok(models)
     }
 
@@ -1921,6 +2254,20 @@ impl MultiTokenManager {
                 },
                 success_count: 0,
                 last_used_at: None,
+                groups: vec![GroupSummary {
+                    id: 1,
+                    name: "default".to_string(),
+                }],
+                schedulable: !disabled,
+                status: if disabled {
+                    "disabled".to_string()
+                } else {
+                    "active".to_string()
+                },
+                temp_unschedulable_until: None,
+                temp_unschedulable_reason: None,
+                rate_limit_reset_at: None,
+                overload_until: None,
             });
         }
 
@@ -1929,6 +2276,16 @@ impl MultiTokenManager {
 
         tracing::info!("成功添加凭据 #{}", new_id);
         Ok(new_id)
+    }
+
+    pub fn update_account_groups(&self, id: u64, groups: Vec<GroupSummary>) -> anyhow::Result<()> {
+        let mut entries = self.entries.lock();
+        let entry = entries
+            .iter_mut()
+            .find(|e| e.id == id)
+            .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+        entry.groups = groups;
+        Ok(())
     }
 
     /// 删除凭据（Admin API）
@@ -1987,11 +2344,17 @@ impl MultiTokenManager {
             }
         }
 
-        // 持久化更改
-        self.persist_credentials()?;
-
-        // 立即回写统计数据，清除已删除凭据的残留条目
-        self.save_stats();
+        if let Some(store) = self.account_store.as_ref() {
+            let store = Arc::clone(store);
+            tokio::spawn(async move {
+                if let Err(err) = store.soft_delete_account(id).await {
+                    tracing::warn!("从数据库删除账号 #{} 失败: {}", id, err);
+                }
+            });
+        } else {
+            self.persist_credentials()?;
+            self.save_stats();
+        }
 
         tracing::info!("已删除凭据 #{}", id);
         Ok(())
@@ -2217,9 +2580,16 @@ mod tests {
         let mut existing = KiroCredentials::default();
         existing.refresh_token = Some("a".repeat(150));
 
-        let manager =
-            MultiTokenManager::new(config, vec![existing], None, None, false, test_registry())
-                .unwrap();
+        let manager = MultiTokenManager::new(
+            config,
+            vec![existing],
+            None,
+            None,
+            false,
+            test_registry(),
+            None,
+        )
+        .unwrap();
 
         let mut duplicate = KiroCredentials::default();
         duplicate.refresh_token = Some("a".repeat(150));
@@ -2237,9 +2607,16 @@ mod tests {
         existing.refresh_token = Some("a".repeat(150));
         existing.email = Some("User@Example.com".to_string());
 
-        let manager =
-            MultiTokenManager::new(config, vec![existing], None, None, false, test_registry())
-                .unwrap();
+        let manager = MultiTokenManager::new(
+            config,
+            vec![existing],
+            None,
+            None,
+            false,
+            test_registry(),
+            None,
+        )
+        .unwrap();
 
         let mut duplicate = KiroCredentials::default();
         duplicate.refresh_token = Some("b".repeat(150));
@@ -2254,7 +2631,8 @@ mod tests {
     async fn test_add_credential_api_key_success() {
         let config = Config::default();
         let manager =
-            MultiTokenManager::new(config, vec![], None, None, false, test_registry()).unwrap();
+            MultiTokenManager::new(config, vec![], None, None, false, test_registry(), None)
+                .unwrap();
 
         let mut api_key_cred = KiroCredentials::default();
         api_key_cred.kiro_api_key = Some("ksk_test_key_123".to_string());
@@ -2288,6 +2666,7 @@ mod tests {
             Some(path.clone()),
             false,
             test_registry(),
+            None,
         )
         .unwrap();
 
@@ -2335,6 +2714,7 @@ mod tests {
             Some(path.clone()),
             false,
             test_registry(),
+            None,
         )
         .unwrap();
 
@@ -2374,6 +2754,7 @@ mod tests {
             Some(path.clone()),
             true,
             test_registry(),
+            None,
         )
         .unwrap();
 
@@ -2410,6 +2791,7 @@ mod tests {
             Some(path.clone()),
             false,
             test_registry(),
+            None,
         )
         .unwrap();
 
@@ -2449,9 +2831,16 @@ mod tests {
         credential.profile_arn = Some("arn:aws:test".to_string());
         credential.subscription_title = Some("KIRO FREE".to_string());
 
-        let manager =
-            MultiTokenManager::new(config, vec![credential], None, None, true, test_registry())
-                .unwrap();
+        let manager = MultiTokenManager::new(
+            config,
+            vec![credential],
+            None,
+            None,
+            true,
+            test_registry(),
+            None,
+        )
+        .unwrap();
 
         let exported = manager.export_credentials(&[1]).unwrap();
 
@@ -2476,9 +2865,16 @@ mod tests {
         existing.kiro_api_key = Some("ksk_existing_key".to_string());
         existing.auth_method = Some("api_key".to_string());
 
-        let manager =
-            MultiTokenManager::new(config, vec![existing], None, None, false, test_registry())
-                .unwrap();
+        let manager = MultiTokenManager::new(
+            config,
+            vec![existing],
+            None,
+            None,
+            false,
+            test_registry(),
+            None,
+        )
+        .unwrap();
 
         let mut duplicate = KiroCredentials::default();
         duplicate.kiro_api_key = Some("ksk_existing_key".to_string());
@@ -2499,7 +2895,8 @@ mod tests {
     async fn test_add_credential_api_key_empty_rejected() {
         let config = Config::default();
         let manager =
-            MultiTokenManager::new(config, vec![], None, None, false, test_registry()).unwrap();
+            MultiTokenManager::new(config, vec![], None, None, false, test_registry(), None)
+                .unwrap();
 
         let mut cred = KiroCredentials::default();
         cred.kiro_api_key = Some(String::new());
@@ -2520,7 +2917,8 @@ mod tests {
     async fn test_add_credential_api_key_missing_key_rejected() {
         let config = Config::default();
         let manager =
-            MultiTokenManager::new(config, vec![], None, None, false, test_registry()).unwrap();
+            MultiTokenManager::new(config, vec![], None, None, false, test_registry(), None)
+                .unwrap();
 
         let mut cred = KiroCredentials::default();
         cred.auth_method = Some("api_key".to_string());
@@ -2544,9 +2942,16 @@ mod tests {
         let mut oauth_cred = KiroCredentials::default();
         oauth_cred.refresh_token = Some("a".repeat(150));
 
-        let manager =
-            MultiTokenManager::new(config, vec![oauth_cred], None, None, false, test_registry())
-                .unwrap();
+        let manager = MultiTokenManager::new(
+            config,
+            vec![oauth_cred],
+            None,
+            None,
+            false,
+            test_registry(),
+            None,
+        )
+        .unwrap();
 
         let mut api_key_cred = KiroCredentials::default();
         api_key_cred.kiro_api_key = Some("ksk_new_key".to_string());
@@ -2575,6 +2980,7 @@ mod tests {
             None,
             false,
             test_registry(),
+            None,
         )
         .unwrap();
         assert_eq!(manager.total_count(), 2);
@@ -2584,7 +2990,8 @@ mod tests {
     #[test]
     fn test_multi_token_manager_empty_credentials() {
         let config = Config::default();
-        let result = MultiTokenManager::new(config, vec![], None, None, false, test_registry());
+        let result =
+            MultiTokenManager::new(config, vec![], None, None, false, test_registry(), None);
         // 支持 0 个凭据启动（可通过管理面板添加）
         assert!(result.is_ok());
         let manager = result.unwrap();
@@ -2607,6 +3014,7 @@ mod tests {
             None,
             false,
             test_registry(),
+            None,
         );
         assert!(result.is_err());
         let err_msg = result.err().unwrap().to_string();
@@ -2636,6 +3044,7 @@ mod tests {
             None,
             false,
             test_registry(),
+            None,
         )
         .unwrap();
         assert_eq!(manager.total_count(), 2);
@@ -2652,7 +3061,8 @@ mod tests {
         cred.kiro_api_key = Some("ksk_test123".to_string());
 
         let manager =
-            MultiTokenManager::new(config, vec![cred], None, None, false, test_registry()).unwrap();
+            MultiTokenManager::new(config, vec![cred], None, None, false, test_registry(), None)
+                .unwrap();
         assert_eq!(manager.total_count(), 1);
         assert_eq!(manager.available_count(), 1);
     }
@@ -2670,6 +3080,7 @@ mod tests {
             None,
             false,
             test_registry(),
+            None,
         )
         .unwrap();
 
@@ -2696,7 +3107,8 @@ mod tests {
         let cred = KiroCredentials::default();
 
         let manager =
-            MultiTokenManager::new(config, vec![cred], None, None, false, test_registry()).unwrap();
+            MultiTokenManager::new(config, vec![cred], None, None, false, test_registry(), None)
+                .unwrap();
 
         // 失败两次（使用 ID 1）
         manager.report_failure(1);
@@ -2726,6 +3138,7 @@ mod tests {
             None,
             false,
             test_registry(),
+            None,
         )
         .unwrap();
 
@@ -2750,6 +3163,7 @@ mod tests {
             None,
             false,
             test_registry(),
+            None,
         )
         .unwrap();
 
@@ -2781,6 +3195,7 @@ mod tests {
             None,
             false,
             test_registry(),
+            None,
         )
         .unwrap();
 
@@ -2795,7 +3210,7 @@ mod tests {
         assert_eq!(manager.available_count(), 0);
 
         // 应触发自愈：重置失败计数并重新启用，避免必须重启进程
-        let ctx = manager.acquire_context(None).await.unwrap();
+        let ctx = manager.acquire_context(None, None).await.unwrap();
         assert!(ctx.token() == "t1" || ctx.token() == "t2");
         assert_eq!(manager.available_count(), 2);
     }
@@ -2822,10 +3237,11 @@ mod tests {
             None,
             false,
             test_registry(),
+            None,
         )
         .unwrap();
 
-        let ctx = manager.acquire_context(None).await.unwrap();
+        let ctx = manager.acquire_context(None, None).await.unwrap();
         assert_eq!(ctx.id(), 2);
         assert_eq!(ctx.token(), "good-token");
     }
@@ -2843,6 +3259,7 @@ mod tests {
             None,
             false,
             test_registry(),
+            None,
         )
         .unwrap();
 
@@ -2875,6 +3292,7 @@ mod tests {
             None,
             false,
             test_registry(),
+            None,
         )
         .unwrap();
 
@@ -2885,7 +3303,7 @@ mod tests {
         assert_eq!(manager.available_count(), 0);
 
         let err = manager
-            .acquire_context(None)
+            .acquire_context(None, None)
             .await
             .err()
             .unwrap()
@@ -2910,6 +3328,7 @@ mod tests {
             None,
             false,
             test_registry(),
+            None,
         )
         .unwrap();
 
@@ -2936,6 +3355,7 @@ mod tests {
             None,
             false,
             test_registry(),
+            None,
         )
         .unwrap();
 
@@ -2944,7 +3364,7 @@ mod tests {
         assert_eq!(manager.available_count(), 0);
 
         let err = manager
-            .acquire_context(None)
+            .acquire_context(None, None)
             .await
             .err()
             .unwrap()
@@ -3123,9 +3543,10 @@ mod tests {
             None,
             false,
             test_registry(),
+            None,
         )
         .unwrap();
-        let ctx = manager.acquire_context(None).await.unwrap();
+        let ctx = manager.acquire_context(None, None).await.unwrap();
         assert_eq!(ctx.endpoint().name(), "ide");
         // machine_id 与 generate_from_credentials 字节相等
         let expected = machine_id::generate_from_credentials(ctx.credentials(), &config);

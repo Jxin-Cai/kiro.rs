@@ -91,6 +91,19 @@ pub struct Config {
     #[serde(default = "default_load_balancing_mode")]
     pub load_balancing_mode: String,
 
+    /// 数据库连接地址；未配置时使用 credentials.json 同目录下的 kiro.db
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database_url: Option<String>,
+
+    /// 是否在数据库为空时自动从 JSON 凭据和统计文件导入
+    #[serde(default = "default_auto_migrate_json")]
+    pub auto_migrate_json: bool,
+
+    /// 是否在数据库模式下继续双写旧 JSON 文件
+    #[serde(default)]
+    pub json_compatibility_write: bool,
+
     /// 是否开启非流式响应的 thinking 块提取（默认 true）
     ///
     /// 启用后，非流式响应中的 `<thinking>...</thinking>` 标签会被解析为
@@ -155,6 +168,10 @@ fn default_extract_thinking() -> bool {
     true
 }
 
+fn default_auto_migrate_json() -> bool {
+    true
+}
+
 fn default_endpoint() -> String {
     crate::kiro::endpoint::ide::IDE_ENDPOINT_NAME.to_string()
 }
@@ -181,6 +198,9 @@ impl Default for Config {
             proxy_password: None,
             admin_api_key: None,
             load_balancing_mode: default_load_balancing_mode(),
+            database_url: None,
+            auto_migrate_json: default_auto_migrate_json(),
+            json_compatibility_write: false,
             extract_thinking: default_extract_thinking(),
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),
@@ -236,7 +256,8 @@ impl Config {
             .ok_or_else(|| anyhow::anyhow!("配置文件路径未知，无法保存配置"))?;
 
         let content = serde_json::to_string_pretty(self).context("序列化配置失败")?;
-        fs::write(path, content).with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+        fs::write(path, content)
+            .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
         Ok(())
     }
 }

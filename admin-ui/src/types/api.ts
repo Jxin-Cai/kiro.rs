@@ -13,6 +13,9 @@ export interface CredentialsQuery {
   status?: string
   authMethod?: string
   endpoint?: string
+  groupId?: number
+  schedulable?: boolean
+  cooldown?: boolean
   sortKey?: string
   sortDirection?: 'asc' | 'desc'
 }
@@ -23,6 +26,11 @@ export interface CredentialsStatusResponse {
   currentId: number
   credentials: CredentialStatusItem[]
   pagination: CredentialsPagination
+}
+
+export interface GroupSummary {
+  id: number
+  name: string
 }
 
 // 单个凭据状态
@@ -47,6 +55,13 @@ export interface CredentialStatusItem {
   disabledReason?: string
   endpoint: string
   supportedModels: string[]
+  groups: GroupSummary[]
+  schedulable: boolean
+  status: string
+  tempUnschedulableUntil?: string | null
+  tempUnschedulableReason?: string | null
+  rateLimitResetAt?: string | null
+  overloadUntil?: string | null
 }
 
 // 余额响应
@@ -120,6 +135,101 @@ export interface CredentialModelsResponse {
 
 export interface SetSupportedModelsRequest {
   models: string[]
+}
+
+export interface SetAccountGroupsRequest {
+  groupIds: number[]
+}
+
+export interface GroupRecord {
+  id: number
+  name: string
+  description?: string | null
+  status: string
+  priority: number
+  isDefault: boolean
+  createdAt: string
+  accountCount: number
+}
+
+export interface CreateGroupRequest {
+  name: string
+  description?: string
+  priority?: number
+}
+
+export interface UpdateGroupRequest {
+  name?: string
+  description?: string
+  status?: string
+  priority?: number
+}
+
+export interface ApiKeyRecord {
+  id: number
+  name: string
+  status: string
+  groupId?: number | null
+  groupName?: string | null
+  lastUsedAt?: string | null
+  quotaLimit: number
+  quotaUsed: number
+  expiresAt?: string | null
+  createdAt: string
+}
+
+export interface CreateApiKeyRequest {
+  name: string
+  groupId?: number
+  quotaLimit?: number
+  expiresAt?: string
+}
+
+export interface UpdateApiKeyRequest {
+  name?: string
+  status?: string
+  groupId?: number
+  quotaLimit?: number
+  expiresAt?: string
+}
+
+export interface CreateApiKeyResponse {
+  success: boolean
+  message: string
+  apiKey: string
+  record: ApiKeyRecord
+}
+
+export interface UsageLogsQuery {
+  page: number
+  pageSize: number
+  accountId?: number
+  groupId?: number
+}
+
+export interface UsageLogItem {
+  id: number
+  apiKeyId?: number | null
+  groupId?: number | null
+  accountId: number
+  model?: string | null
+  endpoint?: string | null
+  stream: boolean
+  status: string
+  httpStatus?: number | null
+  errorKind?: string | null
+  inputTokens: number
+  outputTokens: number
+  durationMs?: number | null
+  createdAt: string
+}
+
+export interface UsageLogsResponse {
+  logs: UsageLogItem[]
+  page: number
+  pageSize: number
+  totalItems: number
+  totalPages: number
 }
 
 // 添加凭据响应

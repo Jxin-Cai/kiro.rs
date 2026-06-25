@@ -7,10 +7,12 @@ use axum::{
 
 use super::{
     handlers::{
-        add_credential, delete_credential, export_credentials, force_refresh_token,
-        get_all_credentials, get_credential_balance, get_credential_models, get_load_balancing_mode,
-        reset_failure_count, set_credential_disabled, set_credential_models,
-        set_credential_priority, set_load_balancing_mode,
+        add_credential, create_api_key, create_group, delete_api_key, delete_credential,
+        delete_group, export_credentials, force_refresh_token, get_all_credentials,
+        get_credential_balance, get_credential_models, get_load_balancing_mode, list_api_keys,
+        list_groups, list_usage_logs, reset_failure_count, rotate_api_key, set_account_groups,
+        set_credential_disabled, set_credential_models, set_credential_priority,
+        set_load_balancing_mode, update_api_key, update_group,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -46,8 +48,21 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}/priority", post(set_credential_priority))
         .route("/credentials/{id}/reset", post(reset_failure_count))
         .route("/credentials/{id}/refresh", post(force_refresh_token))
-        .route("/credentials/{id}/models", get(get_credential_models).put(set_credential_models))
+        .route(
+            "/credentials/{id}/models",
+            get(get_credential_models).put(set_credential_models),
+        )
         .route("/credentials/{id}/balance", get(get_credential_balance))
+        .route("/credentials/{id}/groups", post(set_account_groups))
+        .route("/api-keys", get(list_api_keys).post(create_api_key))
+        .route(
+            "/api-keys/{id}",
+            post(update_api_key).delete(delete_api_key),
+        )
+        .route("/api-keys/{id}/rotate", post(rotate_api_key))
+        .route("/groups", get(list_groups).post(create_group))
+        .route("/groups/{id}", post(update_group).delete(delete_group))
+        .route("/usage-logs", get(list_usage_logs))
         .route(
             "/config/load-balancing",
             get(get_load_balancing_mode).put(set_load_balancing_mode),

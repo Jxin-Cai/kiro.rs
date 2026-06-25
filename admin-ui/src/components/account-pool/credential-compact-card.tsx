@@ -12,6 +12,7 @@ import {
   Wallet,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -54,6 +55,13 @@ import {
   getCredentialSecondaryText,
 } from '@/lib/credential-format'
 import type { BalanceResponse, CredentialStatusItem } from '@/types/api'
+
+function formatTempCooldown(value?: string | null) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
 
 interface CredentialCompactCardProps {
   credential: CredentialStatusItem
@@ -163,9 +171,41 @@ export function CredentialCompactCard({
                 <div className="truncate text-xs text-muted-foreground" title={(credential.supportedModels || []).join(', ') || '全部模型'}>
                   模型：{formatSupportedModels(credential.supportedModels)}
                 </div>
+                <div className="flex flex-wrap gap-1">
+                  {(credential.groups || []).length === 0 ? (
+                    <span className="text-xs text-muted-foreground">未分组</span>
+                  ) : (
+                    credential.groups.slice(0, 3).map(group => (
+                      <Badge key={group.id} variant="secondary" className="px-1.5 py-0 text-[10px]">
+                        {group.name}
+                      </Badge>
+                    ))
+                  )}
+                </div>
               </div>
-              <StatusBadge health={health} />
+              <div className="flex flex-col items-end gap-1">
+                <StatusBadge health={health} />
+                {!credential.schedulable && !credential.disabled && (
+                  <Badge variant="warning" className="px-1.5 py-0 text-[10px]">不可调度</Badge>
+                )}
+              </div>
             </div>
+
+            {credential.tempUnschedulableUntil && (
+              <div className="rounded-md border border-yellow-200 bg-yellow-50 px-2 py-1 text-xs text-yellow-800 dark:border-yellow-950 dark:bg-yellow-950/30 dark:text-yellow-200">
+                临时冷却至 {formatTempCooldown(credential.tempUnschedulableUntil)}{credential.tempUnschedulableReason ? `：${credential.tempUnschedulableReason}` : ''}
+              </div>
+            )}
+            {credential.rateLimitResetAt && (
+              <div className="rounded-md border border-orange-200 bg-orange-50 px-2 py-1 text-xs text-orange-800 dark:border-orange-950 dark:bg-orange-950/30 dark:text-orange-200">
+                限速冷却至 {formatTempCooldown(credential.rateLimitResetAt)}
+              </div>
+            )}
+            {credential.overloadUntil && (
+              <div className="rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-xs text-blue-800 dark:border-blue-950 dark:bg-blue-950/30 dark:text-blue-200">
+                过载冷却至 {formatTempCooldown(credential.overloadUntil)}
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div className="min-w-0">

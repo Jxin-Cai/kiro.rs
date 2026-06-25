@@ -8,12 +8,13 @@
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 use crate::http_client::{ProxyConfig, build_client};
+use crate::kiro::account_store::UsageLogDraft;
 use crate::kiro::endpoint::{EndpointErrorKind, KiroRequest};
-use crate::kiro::model::credentials::KiroCredentials;
+use crate::kiro::model::credentials::{KiroCredentials, TempUnschedulableRule};
 use crate::kiro::token_manager::MultiTokenManager;
 
 // 注：KiroProvider 本身不再直接持有 EndpointRegistry —— 重试循环通过 ctx.endpoint() 访问。
@@ -26,6 +27,12 @@ const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
 
 /// 总重试次数硬上限（避免无限重试）
 const MAX_TOTAL_RETRIES: usize = 9;
+
+#[derive(Debug, Clone, Default)]
+pub struct RequestAuthContext {
+    pub api_key_id: Option<i64>,
+    pub group_id: Option<i64>,
+}
 
 /// Kiro API Provider
 ///
@@ -80,28 +87,107 @@ impl KiroProvider {
         Ok(client)
     }
 
+    pub(crate) fn token_manager(&self) -> Arc<MultiTokenManager> {
+        Arc::clone(&self.token_manager)
+    }
+
     /// 发送非流式 API 请求
     ///
     /// 支持多凭据故障转移（见 [`Self::call_api_with_retry`]）
     pub async fn call_api(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
-        self.call_api_with_retry(request_body, false).await
+        self.call_api_with_auth(request_body, RequestAuthContext::default())
+            .await
+    }
+
+    pub async fn call_api_with_auth(
+        &self,
+        request_body: &str,
+        auth_context: RequestAuthContext,
+    ) -> anyhow::Result<reqwest::Response> {
+        self.call_api_with_retry(request_body, false, auth_context)
+            .await
     }
 
     /// 发送流式 API 请求
     pub async fn call_api_stream(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
-        self.call_api_with_retry(request_body, true).await
+        self.call_api_stream_with_auth(request_body, RequestAuthContext::default())
+            .await
+    }
+
+    pub async fn call_api_stream_with_auth(
+        &self,
+        request_body: &str,
+        auth_context: RequestAuthContext,
+    ) -> anyhow::Result<reqwest::Response> {
+        self.call_api_with_retry(request_body, true, auth_context)
+            .await
     }
 
     /// 发送 MCP API 请求（WebSearch 等工具调用）
     pub async fn call_mcp(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
-        self.call_mcp_with_retry(request_body).await
+        self.call_mcp_with_auth(request_body, RequestAuthContext::default())
+            .await
+    }
+
+    pub async fn call_mcp_with_auth(
+        &self,
+        request_body: &str,
+        auth_context: RequestAuthContext,
+    ) -> anyhow::Result<reqwest::Response> {
+        self.call_mcp_with_retry(request_body, auth_context).await
     }
 
     /// 内部方法：带重试逻辑的 MCP API 调用
-    async fn call_mcp_with_retry(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
+    async fn call_mcp_with_retry(
+        &self,
+        request_body: &str,
+        auth_context: RequestAuthContext,
+    ) -> anyhow::Result<reqwest::Response> {
         // MCP 调用（WebSearch 等工具）不涉及模型选择，无需按模型过滤凭据
         let req = KiroRequest::Mcp { body: request_body };
-        self.call_with_retry(&req, None, "MCP 请求").await
+        self.call_with_retry(&req, None, "MCP 请求", auth_context)
+            .await
+    }
+
+    fn record_usage_async(
+        &self,
+        auth_context: &RequestAuthContext,
+        ctx: &crate::kiro::token_manager::CallContext,
+        req: &KiroRequest<'_>,
+        status: &str,
+        http_status: Option<u16>,
+        error_kind: Option<&str>,
+        duration_ms: i64,
+    ) {
+        let Some(store) = self.token_manager.account_store() else {
+            return;
+        };
+        let model = match req {
+            KiroRequest::GenerateAssistant { model, .. } => model.map(str::to_string),
+            KiroRequest::Mcp { .. } => Some("mcp".to_string()),
+            _ => None,
+        };
+        let stream = matches!(req, KiroRequest::GenerateAssistant { stream: true, .. });
+        let endpoint = ctx.credentials().endpoint.clone();
+        let draft = UsageLogDraft {
+            api_key_id: auth_context.api_key_id,
+            group_id: auth_context.group_id,
+            account_id: ctx.id(),
+            model,
+            endpoint,
+            stream,
+            status: status.to_string(),
+            http_status,
+            error_kind: error_kind.map(str::to_string),
+            input_tokens: 0,
+            output_tokens: 0,
+            duration_ms: Some(duration_ms),
+        };
+        tokio::spawn(async move {
+            if let Err(err) = store.record_usage(draft).await {
+                tracing::warn!("写入使用日志失败: {}", err);
+            }
+        });
     }
 
     /// 内部方法：带重试逻辑的 API 调用
@@ -114,6 +200,7 @@ impl KiroProvider {
         &self,
         request_body: &str,
         is_stream: bool,
+        auth_context: RequestAuthContext,
     ) -> anyhow::Result<reqwest::Response> {
         let model = Self::extract_model_from_request(request_body);
         let kind_label = if is_stream {
@@ -126,7 +213,7 @@ impl KiroProvider {
             stream: is_stream,
             model: model.as_deref(),
         };
-        self.call_with_retry(&req, model.as_deref(), kind_label)
+        self.call_with_retry(&req, model.as_deref(), kind_label, auth_context)
             .await
     }
 
@@ -148,6 +235,7 @@ impl KiroProvider {
         req: &KiroRequest<'_>,
         model_for_acquire: Option<&str>,
         kind_label: &str,
+        auth_context: RequestAuthContext,
     ) -> anyhow::Result<reqwest::Response> {
         let total_credentials = self.token_manager.total_count();
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
@@ -155,7 +243,11 @@ impl KiroProvider {
         let mut force_refreshed: HashSet<u64> = HashSet::new();
 
         for attempt in 0..max_retries {
-            let ctx = match self.token_manager.acquire_context(model_for_acquire).await {
+            let ctx = match self
+                .token_manager
+                .acquire_context(model_for_acquire, auth_context.group_id)
+                .await
+            {
                 Ok(c) => c,
                 Err(e) => {
                     last_error = Some(e);
@@ -169,6 +261,7 @@ impl KiroProvider {
 
             let client = self.client_for(ctx.credentials())?;
             let request = endpoint.build_request(&client, &rctx, req)?;
+            let started_at = Instant::now();
 
             let response = match request.send().await {
                 Ok(resp) => resp,
@@ -193,6 +286,15 @@ impl KiroProvider {
             // 成功响应
             if status.is_success() {
                 self.token_manager.report_success(ctx.id());
+                self.record_usage_async(
+                    &auth_context,
+                    &ctx,
+                    req,
+                    "success",
+                    Some(status.as_u16()),
+                    None,
+                    started_at.elapsed().as_millis() as i64,
+                );
                 return Ok(response);
             }
 
@@ -205,7 +307,58 @@ impl KiroProvider {
                 }
             };
 
-            match endpoint.classify_error(status.as_u16(), &body) {
+            let status_code = status.as_u16();
+            if let Some(rule) = Self::match_temp_unschedulable_rule(ctx.credentials(), status_code, &body) {
+                let duration_minutes = rule.duration_minutes.max(1);
+                let until = chrono::Utc::now() + chrono::Duration::minutes(duration_minutes);
+                let reason = rule
+                    .description
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("临时冷却规则命中");
+                self.token_manager
+                    .set_temp_unschedulable(ctx.id(), until, reason.to_string());
+                tracing::warn!(
+                    "{}失败（命中临时冷却规则，账号 #{} 冷却 {} 分钟，尝试 {}/{}）: {} {}",
+                    kind_label,
+                    ctx.id(),
+                    duration_minutes,
+                    attempt + 1,
+                    max_retries,
+                    status_code,
+                    body
+                );
+                last_error = Some(anyhow::anyhow!(
+                    "{}失败（账号临时冷却）: {} {}",
+                    kind_label,
+                    status_code,
+                    body
+                ));
+                continue;
+            }
+
+            let error_kind = endpoint.classify_error(status_code, &body);
+            self.record_usage_async(
+                &auth_context,
+                &ctx,
+                req,
+                "error",
+                Some(status.as_u16()),
+                Some(match error_kind {
+                    EndpointErrorKind::MonthlyQuotaExhausted => "monthly_quota_exhausted",
+                    EndpointErrorKind::BadRequest => "bad_request",
+                    EndpointErrorKind::BearerTokenInvalid => "bearer_token_invalid",
+                    EndpointErrorKind::Unauthorized => "unauthorized",
+                    EndpointErrorKind::RateLimited => "rate_limited",
+                    EndpointErrorKind::Overloaded => "overloaded",
+                    EndpointErrorKind::Transient => "transient",
+                    EndpointErrorKind::ClientError => "client_error",
+                    EndpointErrorKind::Unknown => "unknown",
+                }),
+                started_at.elapsed().as_millis() as i64,
+            );
+
+            match error_kind {
                 EndpointErrorKind::MonthlyQuotaExhausted => {
                     tracing::warn!(
                         "{}失败（额度已用尽，禁用凭据并切换，尝试 {}/{}）: {} {}",
@@ -276,6 +429,45 @@ impl KiroProvider {
                     }
 
                     last_error = Some(anyhow::anyhow!("{}失败: {} {}", kind_label, status, body));
+                    continue;
+                }
+                EndpointErrorKind::RateLimited => {
+                    // 429 速率限制：设置冷却时间并切换账号重试
+                    tracing::warn!(
+                        "{}失败（速率限制，尝试 {}/{}）: {} {}",
+                        kind_label,
+                        attempt + 1,
+                        max_retries,
+                        status,
+                        body
+                    );
+
+                    // TODO: 解析 Retry-After header 或响应体中的重置时间
+                    // 当前默认冷却 60 秒
+                    let reset_at = chrono::Utc::now() + chrono::Duration::seconds(60);
+                    self.token_manager.set_rate_limit(ctx.id(), reset_at);
+
+                    // 立即切换到下一个可用账号，不消耗重试次数
+                    last_error = Some(anyhow::anyhow!("{}失败（速率限制）: {} {}", kind_label, status, body));
+                    continue;
+                }
+                EndpointErrorKind::Overloaded => {
+                    // 529 服务端过载：设置冷却时间并切换账号重试
+                    tracing::warn!(
+                        "{}失败（服务端过载，尝试 {}/{}）: {} {}",
+                        kind_label,
+                        attempt + 1,
+                        max_retries,
+                        status,
+                        body
+                    );
+
+                    // 默认冷却 10 分钟
+                    let overload_until = chrono::Utc::now() + chrono::Duration::minutes(10);
+                    self.token_manager.set_overload(ctx.id(), overload_until);
+
+                    // 立即切换到下一个可用账号，不消耗重试次数
+                    last_error = Some(anyhow::anyhow!("{}失败（过载）: {} {}", kind_label, status, body));
                     continue;
                 }
                 EndpointErrorKind::Transient => {
@@ -350,5 +542,27 @@ impl KiroProvider {
         let jitter_max = (backoff / 4).max(1);
         let jitter = fastrand::u64(0..=jitter_max);
         Duration::from_millis(backoff.saturating_add(jitter))
+    }
+
+    fn match_temp_unschedulable_rule<'a>(
+        credentials: &'a KiroCredentials,
+        status_code: u16,
+        body: &str,
+    ) -> Option<&'a TempUnschedulableRule> {
+        if !credentials.temp_unschedulable_enabled {
+            return None;
+        }
+
+        let body_lower = body.to_lowercase();
+        credentials.temp_unschedulable_rules.iter().find(|rule| {
+            rule.error_code == status_code
+                && rule.duration_minutes > 0
+                && !rule.keywords.is_empty()
+                && rule
+                    .keywords
+                    .iter()
+                    .map(|keyword| keyword.trim().to_lowercase())
+                    .any(|keyword| !keyword.is_empty() && body_lower.contains(&keyword))
+        })
     }
 }

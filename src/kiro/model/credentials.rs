@@ -11,6 +11,17 @@ use crate::http_client::ProxyConfig;
 use crate::kiro::model::model_catalog::{canonicalize_model_id, canonicalize_model_list};
 use crate::model::config::Config;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempUnschedulableRule {
+    pub error_code: u16,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    pub duration_minutes: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// Kiro OAuth 凭证
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -117,11 +128,25 @@ pub struct KiroCredentials {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub supported_models: Vec<String>,
+
+    /// 是否启用自定义临时冷却规则
+    #[serde(default)]
+    #[serde(skip_serializing_if = "is_false")]
+    pub temp_unschedulable_enabled: bool,
+
+    /// 临时冷却规则：按错误码和响应关键词匹配，命中后账号临时退出调度
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub temp_unschedulable_rules: Vec<TempUnschedulableRule>,
 }
 
 /// 判断是否为零（用于跳过序列化）
 fn is_zero(value: &u32) -> bool {
     *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn canonicalize_auth_method_value(value: &str) -> &str {

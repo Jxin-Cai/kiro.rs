@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: kiro-rs-postgres
+    environment:
+      POSTGRES_DB: kiro
+      POSTGRES_USER: kiro
+      POSTGRES_PASSWORD: kiro
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kiro -d kiro"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   kiro-rs:
     build:
       context: .
@@ -8,6 +24,14 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "8990:8990"
+    environment:
+      DATABASE_URL: postgres://kiro:kiro@postgres:5432/kiro
     volumes:
       - ./config/:/app/config/
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  postgres_data:

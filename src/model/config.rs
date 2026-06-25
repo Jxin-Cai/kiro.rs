@@ -91,7 +91,7 @@ pub struct Config {
     #[serde(default = "default_load_balancing_mode")]
     pub load_balancing_mode: String,
 
-    /// 数据库连接地址；未配置时使用 credentials.json 同目录下的 kiro.db
+    /// PostgreSQL 数据库连接地址；未配置时读取 DATABASE_URL 环境变量
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database_url: Option<String>,

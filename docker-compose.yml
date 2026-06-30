@@ -39,6 +39,7 @@ services:
 
 networks:
   shared-backend:
+    external: true
     name: shared-backend-network
 
 volumes:

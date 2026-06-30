@@ -13,6 +13,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks:
+      - shared-backend
     restart: unless-stopped
 
   kiro-rs:
@@ -31,7 +33,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - shared-backend
     restart: unless-stopped
+
+networks:
+  shared-backend:
+    name: shared-backend-network
 
 volumes:
   postgres_data:

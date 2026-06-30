@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, type ChangeEvent } from 'react'
 import { toast } from 'sonner'
 import { CheckCircle2, XCircle, AlertCircle, Loader2 } from 'lucide-react'
 import {
@@ -49,6 +49,10 @@ interface VerificationResult {
 function normalizeEmail(email?: string) {
   const trimmed = email?.trim().toLowerCase()
   return trimmed || undefined
+}
+
+function accountNameOf(account: KamAccount) {
+  return normalizeEmail(account.email) || normalizeEmail(account.nickname)
 }
 
 // 兼容 KAM 1.8.3 新版平铺格式，统一转换为旧格式（credentials 嵌套结构）
@@ -177,6 +181,22 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
     setResults([])
   }
 
+  const handleFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+
+    try {
+      setJsonInput(await file.text())
+      setResults([])
+      setProgress({ current: 0, total: 0 })
+      setCurrentProcessing(`已读取文件: ${file.name}`)
+      toast.success(`已读取文件: ${file.name}`)
+    } catch (error) {
+      toast.error('读取文件失败: ' + extractErrorMessage(error))
+    }
+  }
+
   const handleImport = async () => {
     // 先单独解析 JSON，给出精准的错误提示
     let validAccounts: KamAccount[]
@@ -218,11 +238,12 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
           .map(c => c.refreshTokenHash)
           .filter((hash): hash is string => Boolean(hash)) || []
       )
-      const existingEmails = new Set(
+      const existingAccountNames = new Set(
         existingCredentials?.credentials
           .map(c => normalizeEmail(c.email))
-          .filter((email): email is string => Boolean(email)) || []
+          .filter((name): name is string => Boolean(name)) || []
       )
+      const seenImportAccountNames = new Set<string>()
 
       let successCount = 0
       let duplicateCount = 0
@@ -242,7 +263,7 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
         const cred = account.credentials
         const token = cred.refreshToken.trim()
         const tokenHash = await sha256Hex(token)
-        const accountEmail = normalizeEmail(account.email)
+        const accountName = accountNameOf(account)
 
         setCurrentProcessing(`正在处理 ${account.email || account.nickname || `账号 ${i + 1}`}`)
         setResults(prev => {
@@ -251,13 +272,23 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
           return next
         })
 
-        // 检查重复
-        if (accountEmail && existingEmails.has(accountEmail)) {
+        // 检查重复：优先按账号名（email，缺失时 nickname）跳过重复数据。
+        if (accountName && existingAccountNames.has(accountName)) {
           duplicateCount++
-          const existingCred = existingCredentials?.credentials.find(c => normalizeEmail(c.email) === accountEmail)
+          const existingCred = existingCredentials?.credentials.find(c => normalizeEmail(c.email) === accountName)
           setResults(prev => {
             const next = [...prev]
-            next[i] = { ...next[i], status: 'duplicate', error: '该邮箱账号已存在', email: existingCred?.email || account.email }
+            next[i] = { ...next[i], status: 'duplicate', error: '该账号名已存在，已跳过', email: existingCred?.email || account.email || account.nickname }
+            return next
+          })
+          setProgress({ current: i + 1, total: validAccounts.length })
+          continue
+        }
+        if (accountName && seenImportAccountNames.has(accountName)) {
+          duplicateCount++
+          setResults(prev => {
+            const next = [...prev]
+            next[i] = { ...next[i], status: 'duplicate', error: '导入文件内账号名重复，已跳过', email: account.email || account.nickname }
             return next
           })
           setProgress({ current: i + 1, total: validAccounts.length })
@@ -301,7 +332,7 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
             clientId,
             clientSecret,
             machineId: account.machineId?.trim() || undefined,
-            email: account.email?.trim() || undefined,
+            email: (account.email || account.nickname)?.trim() || undefined,
           })
 
           addedCredId = addedCred.credentialId
@@ -312,7 +343,10 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
 
           successCount++
           existingTokenHashes.add(tokenHash)
-          if (accountEmail) existingEmails.add(accountEmail)
+          if (accountName) {
+            existingAccountNames.add(accountName)
+            seenImportAccountNames.add(accountName)
+          }
           setCurrentProcessing(`验活成功: ${addedCred.email || account.email || `账号 ${i + 1}`}`)
           setResults(prev => {
             const next = [...prev]
@@ -436,7 +470,28 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
 
         <div className="flex-1 overflow-y-auto space-y-4 py-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">KAM 导出 JSON</label>
+            <div className="flex items-center justify-between gap-3">
+              <label className="text-sm font-medium">KAM 导出 JSON</label>
+              <div>
+                <input
+                  id="kam-import-file"
+                  type="file"
+                  accept="application/json,.json"
+                  className="hidden"
+                  onChange={handleFileImport}
+                  disabled={importing}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={importing}
+                  onClick={() => document.getElementById('kam-import-file')?.click()}
+                >
+                  从文件导入
+                </Button>
+              </div>
+            </div>
             <textarea
               placeholder={'粘贴 Kiro Account Manager 导出的 JSON\n\n支持 KAM 1.8.3+ 新版平铺格式：\n[\n  {\n    "email": "...",\n    "refreshToken": "...",\n    "clientId": "...",\n    "clientSecret": "...",\n    "region": "us-east-1"\n  }\n]\n\n（可选的 authMethod 字段会被忽略，系统会根据 clientId/clientSecret 自动判断）\n\n也支持旧版嵌套格式：\n{\n  "version": "1.5.0",\n  "accounts": [\n    {\n      "email": "...",\n      "credentials": {\n        "refreshToken": "...",\n        "clientId": "...",\n        "clientSecret": "...",\n        "region": "us-east-1"\n      }\n    }\n  ]\n}'}
               value={jsonInput}
@@ -453,7 +508,7 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
           {previewAccounts.length > 0 && !importing && results.length === 0 && (
             <div className="space-y-2">
               <div className="text-sm text-muted-foreground">
-                识别到 {previewAccounts.length} 个账号
+                识别到 {previewAccounts.length} 个账号；导入时按账号名（email，缺失时 nickname）判重，重复数据直接跳过
                 {errorAccountCount > 0 && `（其中 ${errorAccountCount} 个为 error 状态）`}
               </div>
               {errorAccountCount > 0 && (

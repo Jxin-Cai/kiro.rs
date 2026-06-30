@@ -408,6 +408,8 @@ mod tests {
             kiro_api_key: None,
             endpoint: None,
             supported_models: Vec::new(),
+            temp_unschedulable_enabled: false,
+            temp_unschedulable_rules: Vec::new(),
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -556,6 +558,8 @@ mod tests {
             kiro_api_key: None,
             endpoint: None,
             supported_models: Vec::new(),
+            temp_unschedulable_enabled: false,
+            temp_unschedulable_rules: Vec::new(),
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -588,6 +592,8 @@ mod tests {
             kiro_api_key: None,
             endpoint: None,
             supported_models: Vec::new(),
+            temp_unschedulable_enabled: false,
+            temp_unschedulable_rules: Vec::new(),
         };
 
         let json = creds.to_pretty_json().unwrap();
@@ -703,6 +709,8 @@ mod tests {
             kiro_api_key: None,
             endpoint: None,
             supported_models: Vec::new(),
+            temp_unschedulable_enabled: false,
+            temp_unschedulable_rules: Vec::new(),
         };
 
         let json = original.to_pretty_json().unwrap();

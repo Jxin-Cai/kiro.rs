@@ -41,6 +41,48 @@ impl PostgresAccountStore {
         &self.pool
     }
 
+    pub async fn get_app_setting(&self, key: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        let value: Option<String> =
+            sqlx::query_scalar("SELECT value_json FROM app_settings WHERE key = $1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?;
+        value
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
+
+    pub async fn set_app_setting(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO app_settings (key, value_json, updated_at)
+            VALUES ($1, $2, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(key)
+        .bind(serde_json::to_string(value)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_load_balancing_mode(&self) -> anyhow::Result<Option<String>> {
+        let Some(value) = self.get_app_setting("loadBalancingMode").await? else {
+            return Ok(None);
+        };
+        Ok(value.as_str().map(ToString::to_string))
+    }
+
+    pub async fn set_load_balancing_mode(&self, mode: &str) -> anyhow::Result<()> {
+        self.set_app_setting("loadBalancingMode", &serde_json::json!(mode))
+            .await
+    }
+
     pub async fn import_from_json_if_needed(
         &self,
         credentials_path: &Path,

@@ -37,7 +37,7 @@ async fn main() {
     let config_path = args
         .config
         .unwrap_or_else(|| Config::default_config_path().to_string());
-    let config = Config::load(&config_path).unwrap_or_else(|e| {
+    let mut config = Config::load(&config_path).unwrap_or_else(|e| {
         tracing::error!("加载配置失败: {}", e);
         std::process::exit(1);
     });
@@ -120,6 +120,27 @@ async fn main() {
             std::process::exit(1);
         });
     let account_store = Arc::new(PostgresAccountStore::new(db_pool));
+    match account_store.get_load_balancing_mode().await {
+        Ok(Some(mode)) => {
+            if mode == "priority" || mode == "balanced" {
+                config.load_balancing_mode = mode;
+            } else {
+                tracing::warn!(
+                    "数据库中的 loadBalancingMode 无效，使用配置文件值: {}",
+                    mode
+                );
+            }
+        }
+        Ok(None) => {
+            if let Err(e) = account_store
+                .set_load_balancing_mode(&config.load_balancing_mode)
+                .await
+            {
+                tracing::warn!("初始化数据库负载均衡模式失败: {}", e);
+            }
+        }
+        Err(e) => tracing::warn!("读取数据库负载均衡模式失败，使用配置文件值: {}", e),
+    }
     let account_records = account_store.load_accounts().await.unwrap_or_else(|e| {
         tracing::error!("从数据库加载账号失败: {}", e);
         std::process::exit(1);

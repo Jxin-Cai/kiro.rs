@@ -1,7 +1,6 @@
 //! Admin API 业务逻辑服务
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -43,7 +42,6 @@ struct CachedBalance {
 pub struct AdminService {
     token_manager: Arc<MultiTokenManager>,
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
-    cache_path: Option<PathBuf>,
     /// 端点注册表（用于 add_credential 校验）
     endpoint_registry: Arc<EndpointRegistry>,
 }
@@ -53,16 +51,9 @@ impl AdminService {
         token_manager: Arc<MultiTokenManager>,
         endpoint_registry: Arc<EndpointRegistry>,
     ) -> Self {
-        let cache_path = token_manager
-            .cache_dir()
-            .map(|d| d.join("kiro_balance_cache.json"));
-
-        let balance_cache = Self::load_balance_cache_from(&cache_path);
-
         Self {
             token_manager,
-            balance_cache: Mutex::new(balance_cache),
-            cache_path,
+            balance_cache: Mutex::new(HashMap::new()),
             endpoint_registry,
         }
     }
@@ -274,13 +265,14 @@ impl AdminService {
     }
 
     /// 设置凭据禁用状态
-    pub fn set_disabled(&self, id: u64, disabled: bool) -> Result<(), AdminServiceError> {
+    pub async fn set_disabled(&self, id: u64, disabled: bool) -> Result<(), AdminServiceError> {
         // 先获取当前凭据 ID，用于判断是否需要切换
         let snapshot = self.token_manager.snapshot();
         let current_id = snapshot.current_id;
 
         self.token_manager
             .set_disabled(id, disabled)
+            .await
             .map_err(|e| self.classify_error(e, id))?;
 
         // 只有禁用的是当前凭据时才尝试切换到下一个
@@ -291,16 +283,18 @@ impl AdminService {
     }
 
     /// 设置凭据优先级
-    pub fn set_priority(&self, id: u64, priority: u32) -> Result<(), AdminServiceError> {
+    pub async fn set_priority(&self, id: u64, priority: u32) -> Result<(), AdminServiceError> {
         self.token_manager
             .set_priority(id, priority)
+            .await
             .map_err(|e| self.classify_error(e, id))
     }
 
     /// 重置失败计数并重新启用
-    pub fn reset_and_enable(&self, id: u64) -> Result<(), AdminServiceError> {
+    pub async fn reset_and_enable(&self, id: u64) -> Result<(), AdminServiceError> {
         self.token_manager
             .reset_and_enable(id)
+            .await
             .map_err(|e| self.classify_error(e, id))
     }
 
@@ -318,6 +312,24 @@ impl AdminService {
             }
         }
 
+        if let Some(balance) = self
+            .account_store()?
+            .get_balance_cache(id)
+            .await
+            .map_err(db_error)?
+        {
+            tracing::debug!("凭据 #{} 余额命中数据库缓存", id);
+            let mut cache = self.balance_cache.lock();
+            cache.insert(
+                id,
+                CachedBalance {
+                    cached_at: Utc::now().timestamp() as f64,
+                    data: balance.clone(),
+                },
+            );
+            return Ok(balance);
+        }
+
         // 缓存未命中或已过期，从上游获取
         let balance = self.fetch_balance(id).await?;
 
@@ -332,7 +344,10 @@ impl AdminService {
                 },
             );
         }
-        self.save_balance_cache();
+        self.account_store()?
+            .set_balance_cache(id, &balance)
+            .await
+            .map_err(db_error)?;
 
         Ok(balance)
     }
@@ -378,6 +393,36 @@ impl AdminService {
                 return Err(AdminServiceError::InvalidCredential(format!(
                     "未知端点 \"{}\"，已注册端点: {:?}",
                     name, known
+                )));
+            }
+        }
+
+        if let Some(account_name) = req
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let normalized = account_name.to_lowercase();
+            let duplicate = self
+                .token_manager
+                .snapshot()
+                .entries
+                .into_iter()
+                .any(|entry| {
+                    entry
+                        .email
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|email| email.to_lowercase())
+                        .as_deref()
+                        == Some(normalized.as_str())
+                });
+            if duplicate {
+                return Err(AdminServiceError::InvalidCredential(format!(
+                    "账号名已存在，已跳过: {}",
+                    account_name
                 )));
             }
         }
@@ -458,7 +503,7 @@ impl AdminService {
     }
 
     /// 设置当前账号可用模型列表
-    pub fn set_supported_models(
+    pub async fn set_supported_models(
         &self,
         id: u64,
         req: SetSupportedModelsRequest,
@@ -466,6 +511,7 @@ impl AdminService {
         let models = self
             .token_manager
             .set_supported_models(id, req.models)
+            .await
             .map_err(|e| {
                 let msg = e.to_string();
                 if msg.contains("不存在") {
@@ -483,9 +529,10 @@ impl AdminService {
     }
 
     /// 删除凭据
-    pub fn delete_credential(&self, id: u64) -> Result<(), AdminServiceError> {
+    pub async fn delete_credential(&self, id: u64) -> Result<(), AdminServiceError> {
         self.token_manager
             .delete_credential(id)
+            .await
             .map_err(|e| self.classify_delete_error(e, id))?;
 
         // 清理已删除凭据的余额缓存
@@ -493,7 +540,10 @@ impl AdminService {
             let mut cache = self.balance_cache.lock();
             cache.remove(&id);
         }
-        self.save_balance_cache();
+        self.account_store()?
+            .delete_balance_cache(id)
+            .await
+            .map_err(db_error)?;
 
         Ok(())
     }
@@ -613,7 +663,7 @@ impl AdminService {
     }
 
     /// 设置负载均衡模式
-    pub fn set_load_balancing_mode(
+    pub async fn set_load_balancing_mode(
         &self,
         req: SetLoadBalancingModeRequest,
     ) -> Result<LoadBalancingModeResponse, AdminServiceError> {
@@ -626,6 +676,7 @@ impl AdminService {
 
         self.token_manager
             .set_load_balancing_mode(req.mode.clone())
+            .await
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
 
         Ok(LoadBalancingModeResponse { mode: req.mode })
@@ -643,63 +694,6 @@ impl AdminService {
         self.token_manager
             .account_store()
             .ok_or_else(|| AdminServiceError::InternalError("数据库账号存储未启用".to_string()))
-    }
-
-    // ============ 余额缓存持久化 ============
-
-    fn load_balance_cache_from(cache_path: &Option<PathBuf>) -> HashMap<u64, CachedBalance> {
-        let path = match cache_path {
-            Some(p) => p,
-            None => return HashMap::new(),
-        };
-
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => return HashMap::new(),
-        };
-
-        // 文件中使用字符串 key 以兼容 JSON 格式
-        let map: HashMap<String, CachedBalance> = match serde_json::from_str(&content) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!("解析余额缓存失败，将忽略: {}", e);
-                return HashMap::new();
-            }
-        };
-
-        let now = Utc::now().timestamp() as f64;
-        map.into_iter()
-            .filter_map(|(k, v)| {
-                let id = k.parse::<u64>().ok()?;
-                // 丢弃超过 TTL 的条目
-                if (now - v.cached_at) < BALANCE_CACHE_TTL_SECS as f64 {
-                    Some((id, v))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    fn save_balance_cache(&self) {
-        let path = match &self.cache_path {
-            Some(p) => p,
-            None => return,
-        };
-
-        // 持有锁期间完成序列化和写入，防止并发损坏
-        let cache = self.balance_cache.lock();
-        let map: HashMap<String, &CachedBalance> =
-            cache.iter().map(|(k, v)| (k.to_string(), v)).collect();
-
-        match serde_json::to_string_pretty(&map) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(path, json) {
-                    tracing::warn!("保存余额缓存失败: {}", e);
-                }
-            }
-            Err(e) => tracing::warn!("序列化余额缓存失败: {}", e),
-        }
     }
 
     // ============ 错误分类 ============

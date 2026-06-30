@@ -858,12 +858,23 @@ impl MultiTokenManager {
             account_store,
         };
 
-        // 如果有新分配的 ID 或新生成的 machineId，立即持久化到配置文件
+        // 如果有新分配的 ID 或新生成的 machineId，立即持久化。
+        // DB 模式下写入 accounts；legacy 模式下才回写 credentials.json。
         if has_new_ids || has_new_machine_ids {
-            match manager.persist_credentials() {
-                Ok(true) => tracing::info!("已补全凭据 ID/machineId 并写回配置文件"),
-                Ok(false) => tracing::debug!("凭据文件路径未知，跳过补全凭据 ID/machineId 写回"),
-                Err(e) => tracing::warn!("补全凭据 ID/machineId 后持久化失败: {}", e),
+            if manager.account_store.is_some() {
+                let changed_entries = manager.entries.lock().clone();
+                for entry in changed_entries {
+                    manager.persist_entry_to_store(&entry);
+                }
+                tracing::info!("已补全凭据 ID/machineId 并同步到数据库");
+            } else {
+                match manager.persist_credentials() {
+                    Ok(true) => tracing::info!("已补全凭据 ID/machineId 并写回配置文件"),
+                    Ok(false) => {
+                        tracing::debug!("凭据文件路径未知，跳过补全凭据 ID/machineId 写回")
+                    }
+                    Err(e) => tracing::warn!("补全凭据 ID/machineId 后持久化失败: {}", e),
+                }
             }
         }
 
@@ -1190,8 +1201,8 @@ impl MultiTokenManager {
                     }
                 }
 
-                // 回写凭据到文件（仅多凭据格式），失败只记录警告
-                if let Err(e) = self.persist_credentials() {
+                // DB 模式下写入 accounts；legacy 模式下才回写 credentials.json。
+                if let Err(e) = self.persist_entry_by_id(id).await {
                     tracing::warn!("Token 刷新后持久化失败（不影响本次请求）: {}", e);
                 }
 
@@ -1286,11 +1297,8 @@ impl MultiTokenManager {
         Ok(true)
     }
 
-    fn persist_entry_to_store(&self, entry: &CredentialEntry) {
-        let Some(store) = self.account_store.as_ref() else {
-            return;
-        };
-        let record = AccountRecord {
+    fn account_record_from_entry(entry: &CredentialEntry) -> AccountRecord {
+        AccountRecord {
             id: entry.id,
             credentials: entry.credentials.clone(),
             failure_count: entry.failure_count,
@@ -1312,7 +1320,14 @@ impl MultiTokenManager {
             rate_limit_reset_at: entry.rate_limit_reset_at.clone(),
             overload_until: entry.overload_until.clone(),
             groups: entry.groups.clone(),
+        }
+    }
+
+    fn persist_entry_to_store(&self, entry: &CredentialEntry) {
+        let Some(store) = self.account_store.as_ref() else {
+            return;
         };
+        let record = Self::account_record_from_entry(entry);
         let store = Arc::clone(store);
         tokio::spawn(async move {
             if let Err(err) = store.persist_account(&record).await {
@@ -1328,6 +1343,31 @@ impl MultiTokenManager {
         };
         if let Some(entry) = entry {
             self.persist_entry_to_store(&entry);
+        }
+    }
+
+    async fn persist_entry_by_id_to_store_async(&self, id: u64) -> anyhow::Result<()> {
+        let Some(store) = self.account_store.as_ref().map(Arc::clone) else {
+            return Ok(());
+        };
+        let entry = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
+        };
+        let record = Self::account_record_from_entry(&entry);
+        store.persist_account(&record).await
+    }
+
+    async fn persist_entry_by_id(&self, id: u64) -> anyhow::Result<()> {
+        if self.account_store.is_some() {
+            self.persist_entry_by_id_to_store_async(id).await
+        } else {
+            self.persist_credentials()?;
+            Ok(())
         }
     }
 
@@ -1375,8 +1415,11 @@ impl MultiTokenManager {
         tracing::info!("已从缓存加载 {} 条统计数据", stats.len());
     }
 
-    /// 将当前统计数据持久化到磁盘
+    /// 将当前统计数据持久化到磁盘（仅 legacy 无数据库模式使用）
     fn save_stats(&self) {
+        if self.account_store.is_some() {
+            return;
+        }
         let path = match self.stats_path() {
             Some(p) => p,
             None => return,
@@ -1887,7 +1930,7 @@ impl MultiTokenManager {
     }
 
     /// 设置凭据禁用状态（Admin API）
-    pub fn set_disabled(&self, id: u64, disabled: bool) -> anyhow::Result<()> {
+    pub async fn set_disabled(&self, id: u64, disabled: bool) -> anyhow::Result<()> {
         {
             let mut entries = self.entries.lock();
             let entry = entries
@@ -1904,18 +1947,14 @@ impl MultiTokenManager {
                 entry.disabled_reason = Some(DisabledReason::Manual);
             }
         }
-        self.persist_entry_by_id_to_store(id);
-        if self.account_store.is_none() {
-            self.persist_credentials()?;
-        }
-        Ok(())
+        self.persist_entry_by_id(id).await
     }
 
     /// 设置凭据优先级（Admin API）
     ///
     /// 修改优先级后会立即按新优先级重新选择当前凭据。
     /// 即使持久化失败，内存中的优先级和当前凭据选择也会生效。
-    pub fn set_priority(&self, id: u64, priority: u32) -> anyhow::Result<()> {
+    pub async fn set_priority(&self, id: u64, priority: u32) -> anyhow::Result<()> {
         {
             let mut entries = self.entries.lock();
             let entry = entries
@@ -1926,15 +1965,11 @@ impl MultiTokenManager {
         }
         // 立即按新优先级重新选择当前凭据（无论持久化是否成功）
         self.select_highest_priority();
-        self.persist_entry_by_id_to_store(id);
-        if self.account_store.is_none() {
-            self.persist_credentials()?;
-        }
-        Ok(())
+        self.persist_entry_by_id(id).await
     }
 
     /// 重置凭据失败计数并重新启用（Admin API）
-    pub fn reset_and_enable(&self, id: u64) -> anyhow::Result<()> {
+    pub async fn reset_and_enable(&self, id: u64) -> anyhow::Result<()> {
         {
             let mut entries = self.entries.lock();
             let entry = entries
@@ -1949,15 +1984,11 @@ impl MultiTokenManager {
             entry.disabled = false;
             entry.disabled_reason = None;
         }
-        self.persist_entry_by_id_to_store(id);
-        if self.account_store.is_none() {
-            self.persist_credentials()?;
-        }
-        Ok(())
+        self.persist_entry_by_id(id).await
     }
 
     /// 设置指定凭据的可用模型列表（Admin API）
-    pub fn set_supported_models(
+    pub async fn set_supported_models(
         &self,
         id: u64,
         models: Vec<String>,
@@ -1971,10 +2002,7 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
             entry.credentials.supported_models = models.clone();
         }
-        self.persist_entry_by_id_to_store(id);
-        if self.account_store.is_none() {
-            self.persist_credentials()?;
-        }
+        self.persist_entry_by_id(id).await?;
         Ok(models)
     }
 
@@ -2036,7 +2064,7 @@ impl MultiTokenManager {
             };
 
             if changed {
-                if let Err(e) = self.persist_credentials() {
+                if let Err(e) = self.persist_entry_by_id(id).await {
                     tracing::warn!("订阅等级更新后持久化失败（不影响本次请求）: {}", e);
                 }
             }
@@ -2207,14 +2235,7 @@ impl MultiTokenManager {
             refresh_token(&new_cred, &self.config, effective_proxy.as_ref()).await?
         };
 
-        // 4. 分配新 ID
-        let new_id = {
-            let entries = self.entries.lock();
-            entries.iter().map(|e| e.id).max().unwrap_or(0) + 1
-        };
-
-        // 5. 设置 ID 并保留用户输入的元数据
-        validated_cred.id = Some(new_id);
+        // 4. 保留用户输入的元数据
         validated_cred.priority = new_cred.priority;
         validated_cred.auth_method = new_cred.auth_method.map(|m| {
             if m.eq_ignore_ascii_case("builder-id") || m.eq_ignore_ascii_case("iam") {
@@ -2235,8 +2256,30 @@ impl MultiTokenManager {
         validated_cred.proxy_password = new_cred.proxy_password;
         validated_cred.disabled = new_cred.disabled;
         validated_cred.kiro_api_key = new_cred.kiro_api_key;
+        validated_cred.endpoint = new_cred.endpoint;
         validated_cred.supported_models =
             canonicalize_model_list(&new_cred.supported_models).map_err(|e| anyhow::anyhow!(e))?;
+        validated_cred.canonicalize_auth_method();
+        validated_cred.canonicalize_supported_models();
+
+        // 5. DB 模式下由 PostgreSQL 分配 ID；legacy 模式才使用内存 max + 1。
+        let groups;
+        let new_id = if let Some(store) = self.account_store.as_ref() {
+            let new_id = store.create_account(&validated_cred, &[]).await?;
+            groups = store.get_account_groups(new_id).await?;
+            new_id
+        } else {
+            let new_id = {
+                let entries = self.entries.lock();
+                entries.iter().map(|e| e.id).max().unwrap_or(0) + 1
+            };
+            groups = vec![GroupSummary {
+                id: 1,
+                name: "default".to_string(),
+            }];
+            new_id
+        };
+        validated_cred.id = Some(new_id);
         let disabled = validated_cred.disabled;
 
         {
@@ -2254,10 +2297,7 @@ impl MultiTokenManager {
                 },
                 success_count: 0,
                 last_used_at: None,
-                groups: vec![GroupSummary {
-                    id: 1,
-                    name: "default".to_string(),
-                }],
+                groups,
                 schedulable: !disabled,
                 status: if disabled {
                     "disabled".to_string()
@@ -2271,8 +2311,12 @@ impl MultiTokenManager {
             });
         }
 
-        // 6. 持久化
-        self.persist_credentials()?;
+        // 6. legacy 模式才回写 credentials.json；DB 模式补写一次以确保 credential_json 带有 DB ID。
+        if self.account_store.is_some() {
+            self.persist_entry_by_id_to_store_async(new_id).await?;
+        } else {
+            self.persist_credentials()?;
+        }
 
         tracing::info!("成功添加凭据 #{}", new_id);
         Ok(new_id)
@@ -2304,7 +2348,7 @@ impl MultiTokenManager {
     /// # 返回
     /// - `Ok(())` - 删除成功
     /// - `Err(_)` - 凭据不存在、未禁用或持久化失败
-    pub fn delete_credential(&self, id: u64) -> anyhow::Result<()> {
+    pub async fn delete_credential(&self, id: u64) -> anyhow::Result<()> {
         let was_current = {
             let mut entries = self.entries.lock();
 
@@ -2345,12 +2389,7 @@ impl MultiTokenManager {
         }
 
         if let Some(store) = self.account_store.as_ref() {
-            let store = Arc::clone(store);
-            tokio::spawn(async move {
-                if let Err(err) = store.soft_delete_account(id).await {
-                    tracing::warn!("从数据库删除账号 #{} 失败: {}", id, err);
-                }
-            });
+            store.soft_delete_account(id).await?;
         } else {
             self.persist_credentials()?;
             self.save_stats();
@@ -2390,8 +2429,8 @@ impl MultiTokenManager {
             }
         }
 
-        // 持久化
-        if let Err(e) = self.persist_credentials() {
+        // DB 模式下写入 accounts；legacy 模式下才回写 credentials.json。
+        if let Err(e) = self.persist_entry_by_id(id).await {
             tracing::warn!("强制刷新 Token 后持久化失败: {}", e);
         }
 
@@ -2426,7 +2465,7 @@ impl MultiTokenManager {
     }
 
     /// 设置负载均衡模式（Admin API）
-    pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
+    pub async fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
         // 验证模式值
         if mode != "priority" && mode != "balanced" {
             anyhow::bail!("无效的负载均衡模式: {}", mode);
@@ -2439,7 +2478,13 @@ impl MultiTokenManager {
 
         *self.load_balancing_mode.lock() = mode.clone();
 
-        if let Err(err) = self.persist_load_balancing_mode(&mode) {
+        let persist_result = if let Some(store) = self.account_store.as_ref() {
+            store.set_load_balancing_mode(&mode).await
+        } else {
+            self.persist_load_balancing_mode(&mode)
+        };
+
+        if let Err(err) = persist_result {
             *self.load_balancing_mode.lock() = previous_mode;
             return Err(err);
         }
@@ -2695,8 +2740,8 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
 
-    #[test]
-    fn test_single_credentials_file_update_persists_without_migrating() {
+    #[tokio::test]
+    async fn test_single_credentials_file_update_persists_without_migrating() {
         let path = temp_credentials_path("single-update");
         std::fs::write(
             &path,
@@ -2718,7 +2763,7 @@ mod tests {
         )
         .unwrap();
 
-        manager.set_priority(1, 42).unwrap();
+        manager.set_priority(1, 42).await.unwrap();
 
         match CredentialsConfig::load(&path).unwrap() {
             CredentialsConfig::Single(credential) => {
@@ -2731,8 +2776,8 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
 
-    #[test]
-    fn test_multiple_credentials_file_delete_keeps_array_format() {
+    #[tokio::test]
+    async fn test_multiple_credentials_file_delete_keeps_array_format() {
         let path = temp_credentials_path("multiple-delete");
         std::fs::write(
             &path,
@@ -2758,8 +2803,8 @@ mod tests {
         )
         .unwrap();
 
-        manager.set_disabled(2, true).unwrap();
-        manager.delete_credential(2).unwrap();
+        manager.set_disabled(2, true).await.unwrap();
+        manager.delete_credential(2).await.unwrap();
 
         match CredentialsConfig::load(&path).unwrap() {
             CredentialsConfig::Multiple(credentials) => {
@@ -2799,8 +2844,8 @@ mod tests {
             .add_credential(api_key_credential("ksk_added_key"))
             .await
             .unwrap();
-        manager.set_disabled(added_id, true).unwrap();
-        manager.delete_credential(added_id).unwrap();
+        manager.set_disabled(added_id, true).await.unwrap();
+        manager.delete_credential(added_id).await.unwrap();
 
         match CredentialsConfig::load(&path).unwrap() {
             CredentialsConfig::Multiple(credentials) => {
@@ -3149,8 +3194,8 @@ mod tests {
         assert_ne!(manager.snapshot().current_id, initial_id);
     }
 
-    #[test]
-    fn test_set_load_balancing_mode_persists_to_config_file() {
+    #[tokio::test]
+    async fn test_set_load_balancing_mode_persists_to_config_file() {
         let config_path =
             std::env::temp_dir().join(format!("kiro-load-balancing-{}.json", uuid::Uuid::new_v4()));
         std::fs::write(&config_path, r#"{"loadBalancingMode":"priority"}"#).unwrap();
@@ -3169,6 +3214,7 @@ mod tests {
 
         manager
             .set_load_balancing_mode("balanced".to_string())
+            .await
             .unwrap();
 
         let persisted = Config::load(&config_path).unwrap();

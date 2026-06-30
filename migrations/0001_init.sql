@@ -149,6 +149,12 @@ CREATE TABLE IF NOT EXISTS balance_cache (
     FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+);
+
 -- Insert default group if not exists
 INSERT INTO groups (name, description, status, priority, is_default)
 SELECT 'default', '默认账号组', 'active', 0, TRUE

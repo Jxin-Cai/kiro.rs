@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ChangeEvent } from 'react'
 import { toast } from 'sonner'
 import { CheckCircle2, XCircle, AlertCircle, Loader2 } from 'lucide-react'
 import {
@@ -54,6 +54,10 @@ function normalizeEmail(email?: string) {
   return trimmed || undefined
 }
 
+function accountNameOf(cred: CredentialInput) {
+  return normalizeEmail(cred.email)
+}
+
 export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps) {
   const [jsonInput, setJsonInput] = useState('')
   const [importing, setImporting] = useState(false)
@@ -91,6 +95,22 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
     setProgress({ current: 0, total: 0 })
     setCurrentProcessing('')
     setResults([])
+  }
+
+  const handleFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+
+    try {
+      setJsonInput(await file.text())
+      setResults([])
+      setProgress({ current: 0, total: 0 })
+      setCurrentProcessing(`已读取文件: ${file.name}`)
+      toast.success(`已读取文件: ${file.name}`)
+    } catch (error) {
+      toast.error('读取文件失败: ' + extractErrorMessage(error))
+    }
   }
 
   const handleBatchImport = async () => {
@@ -131,11 +151,12 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
           .map(c => c.apiKeyHash)
           .filter((hash): hash is string => Boolean(hash)) || []
       )
-      const existingEmails = new Set(
+      const existingAccountNames = new Set(
         existingCredentials?.credentials
           .map(c => normalizeEmail(c.email))
-          .filter((email): email is string => Boolean(email)) || []
+          .filter((name): name is string => Boolean(name)) || []
       )
+      const seenImportAccountNames = new Set<string>()
 
       let successCount = 0
       let duplicateCount = 0
@@ -157,18 +178,33 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
           return newResults
         })
 
-        // 客户端去重：优先按邮箱，其次 OAuth 基于 refreshToken hash，API Key 基于 kiroApiKey hash
-        const credentialEmail = normalizeEmail(cred.email)
-        if (credentialEmail && existingEmails.has(credentialEmail)) {
+        // 客户端去重：优先按账号名（当前使用 email），其次 OAuth/API Key hash。
+        const credentialAccountName = accountNameOf(cred)
+        if (credentialAccountName && existingAccountNames.has(credentialAccountName)) {
           duplicateCount++
-          const existingCred = existingCredentials?.credentials.find(c => normalizeEmail(c.email) === credentialEmail)
+          const existingCred = existingCredentials?.credentials.find(c => normalizeEmail(c.email) === credentialAccountName)
           setResults(prev => {
             const newResults = [...prev]
             newResults[i] = {
               ...newResults[i],
               status: 'duplicate',
-              error: '该邮箱账号已存在',
+              error: '该账号名已存在，已跳过',
               email: existingCred?.email || cred.email,
+            }
+            return newResults
+          })
+          setProgress({ current: i + 1, total: credentials.length })
+          continue
+        }
+        if (credentialAccountName && seenImportAccountNames.has(credentialAccountName)) {
+          duplicateCount++
+          setResults(prev => {
+            const newResults = [...prev]
+            newResults[i] = {
+              ...newResults[i],
+              status: 'duplicate',
+              error: '导入文件内账号名重复，已跳过',
+              email: cred.email,
             }
             return newResults
           })
@@ -285,7 +321,10 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
 
             successCount++
             existingApiKeyHashes.add(credHash)
-            if (credentialEmail) existingEmails.add(credentialEmail)
+            if (credentialAccountName) {
+              existingAccountNames.add(credentialAccountName)
+              seenImportAccountNames.add(credentialAccountName)
+            }
             setCurrentProcessing(addedCred.email ? `验活成功: ${addedCred.email}` : `验活成功: 凭据 ${i + 1}`)
             setResults(prev => {
               const newResults = [...prev]
@@ -343,7 +382,10 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
           // 验活成功
           successCount++
           existingOauthHashes.add(credHash)
-          if (credentialEmail) existingEmails.add(credentialEmail)
+          if (credentialAccountName) {
+              existingAccountNames.add(credentialAccountName)
+              seenImportAccountNames.add(credentialAccountName)
+            }
           setCurrentProcessing(addedCred.email ? `验活成功: ${addedCred.email}` : `验活成功: 凭据 ${i + 1}`)
           setResults(prev => {
             const newResults = [...prev]
@@ -470,9 +512,30 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
 
         <div className="flex-1 overflow-y-auto space-y-4 py-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">
-              JSON 格式凭据
-            </label>
+            <div className="flex items-center justify-between gap-3">
+              <label className="text-sm font-medium">
+                JSON 格式凭据
+              </label>
+              <div>
+                <input
+                  id="batch-import-file"
+                  type="file"
+                  accept="application/json,.json"
+                  className="hidden"
+                  onChange={handleFileImport}
+                  disabled={importing}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={importing}
+                  onClick={() => document.getElementById('batch-import-file')?.click()}
+                >
+                  从文件导入
+                </Button>
+              </div>
+            </div>
             <textarea
               placeholder={'粘贴 JSON 格式的凭据（支持单个对象或数组）\n\nOAuth: [{"refreshToken":"...","clientId":"...","clientSecret":"..."}]\nAPI Key: [{"kiroApiKey":"ksk_xxx"}]\n\n支持 region 字段自动映射为 authRegion'}
               value={jsonInput}
@@ -481,7 +544,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               className="flex min-h-[200px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono"
             />
             <p className="text-xs text-muted-foreground">
-              导入时自动验活，失败的凭据会被排除
+              可粘贴 JSON 或选择 .json 文件；导入时按账号名（email）判重，重复数据直接跳过，失败的凭据会被排除
             </p>
           </div>
 

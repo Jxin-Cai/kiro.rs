@@ -308,7 +308,9 @@ impl KiroProvider {
             };
 
             let status_code = status.as_u16();
-            if let Some(rule) = Self::match_temp_unschedulable_rule(ctx.credentials(), status_code, &body) {
+            if let Some(rule) =
+                Self::match_temp_unschedulable_rule(ctx.credentials(), status_code, &body)
+            {
                 let duration_minutes = rule.duration_minutes.max(1);
                 let until = chrono::Utc::now() + chrono::Duration::minutes(duration_minutes);
                 let reason = rule
@@ -448,7 +450,12 @@ impl KiroProvider {
                     self.token_manager.set_rate_limit(ctx.id(), reset_at);
 
                     // 立即切换到下一个可用账号，不消耗重试次数
-                    last_error = Some(anyhow::anyhow!("{}失败（速率限制）: {} {}", kind_label, status, body));
+                    last_error = Some(anyhow::anyhow!(
+                        "{}失败（速率限制）: {} {}",
+                        kind_label,
+                        status,
+                        body
+                    ));
                     continue;
                 }
                 EndpointErrorKind::Overloaded => {
@@ -467,7 +474,12 @@ impl KiroProvider {
                     self.token_manager.set_overload(ctx.id(), overload_until);
 
                     // 立即切换到下一个可用账号，不消耗重试次数
-                    last_error = Some(anyhow::anyhow!("{}失败（过载）: {} {}", kind_label, status, body));
+                    last_error = Some(anyhow::anyhow!(
+                        "{}失败（过载）: {} {}",
+                        kind_label,
+                        status,
+                        body
+                    ));
                     continue;
                 }
                 EndpointErrorKind::Transient => {

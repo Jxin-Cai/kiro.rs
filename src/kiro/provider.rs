@@ -350,6 +350,7 @@ impl KiroProvider {
                     EndpointErrorKind::MonthlyQuotaExhausted => "monthly_quota_exhausted",
                     EndpointErrorKind::BadRequest => "bad_request",
                     EndpointErrorKind::BearerTokenInvalid => "bearer_token_invalid",
+                    EndpointErrorKind::AccountBanned => "account_banned",
                     EndpointErrorKind::Unauthorized => "unauthorized",
                     EndpointErrorKind::RateLimited => "rate_limited",
                     EndpointErrorKind::Overloaded => "overloaded",
@@ -372,6 +373,24 @@ impl KiroProvider {
                     );
 
                     let has_available = self.token_manager.report_quota_exhausted(ctx.id());
+                    if !has_available {
+                        anyhow::bail!("{}失败（所有凭据已用尽）: {} {}", kind_label, status, body);
+                    }
+
+                    last_error = Some(anyhow::anyhow!("{}失败: {} {}", kind_label, status, body));
+                    continue;
+                }
+                EndpointErrorKind::AccountBanned => {
+                    tracing::error!(
+                        "{}失败（账号疑似已被上游封禁/停用，禁用凭据并切换，尝试 {}/{}）: {} {}",
+                        kind_label,
+                        attempt + 1,
+                        max_retries,
+                        status,
+                        body
+                    );
+
+                    let has_available = self.token_manager.report_account_banned(ctx.id());
                     if !has_available {
                         anyhow::bail!("{}失败（所有凭据已用尽）: {} {}", kind_label, status, body);
                     }

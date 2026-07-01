@@ -498,6 +498,8 @@ enum DisabledReason {
     QuotaExceeded,
     /// Refresh Token 永久失效（服务端返回 invalid_grant）
     InvalidRefreshToken,
+    /// 上游明确返回账号已封禁/停用
+    AccountBanned,
     /// 凭据配置无效（如 authMethod=api_key 但缺少 kiroApiKey）
     InvalidConfig,
 }
@@ -509,6 +511,7 @@ fn disabled_reason_label(reason: DisabledReason) -> &'static str {
         DisabledReason::TooManyRefreshFailures => "TooManyRefreshFailures",
         DisabledReason::QuotaExceeded => "QuotaExceeded",
         DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
+        DisabledReason::AccountBanned => "AccountBanned",
         DisabledReason::InvalidConfig => "InvalidConfig",
     }
 }
@@ -520,6 +523,7 @@ fn disabled_reason_from_label(value: &str) -> Option<DisabledReason> {
         "TooManyRefreshFailures" => Some(DisabledReason::TooManyRefreshFailures),
         "QuotaExceeded" => Some(DisabledReason::QuotaExceeded),
         "InvalidRefreshToken" => Some(DisabledReason::InvalidRefreshToken),
+        "AccountBanned" => Some(DisabledReason::AccountBanned),
         "InvalidConfig" => Some(DisabledReason::InvalidConfig),
         _ => None,
     }
@@ -1615,6 +1619,57 @@ impl MultiTokenManager {
         result
     }
 
+    /// 报告指定凭据账号已被上游封禁/停用。
+    ///
+    /// 用于处理上游明确返回账号级永久不可用的场景：
+    /// - 立即禁用该凭据（不等待连续失败阈值）
+    /// - 切换到下一个可用凭据继续重试
+    /// - 返回是否还有可用凭据
+    pub fn report_account_banned(&self, id: u64) -> bool {
+        let result = {
+            let mut entries = self.entries.lock();
+            let mut current_id = self.current_id.lock();
+
+            let entry = match entries.iter_mut().find(|e| e.id == id) {
+                Some(e) => e,
+                None => return entries.iter().any(|e| !e.disabled),
+            };
+
+            if entry.disabled {
+                return entries.iter().any(|e| !e.disabled);
+            }
+
+            entry.disabled = true;
+            entry.disabled_reason = Some(DisabledReason::AccountBanned);
+            entry.last_used_at = Some(Utc::now().to_rfc3339());
+            // 设为阈值，便于在管理面板中直观看到该凭据已不可用
+            entry.failure_count = MAX_FAILURES_PER_CREDENTIAL;
+
+            tracing::error!("凭据 #{} 账号已被上游封禁/停用，已被禁用", id);
+
+            // 切换到优先级最高的可用凭据
+            if let Some(next) = entries
+                .iter()
+                .filter(|e| !e.disabled)
+                .min_by_key(|e| e.credentials.priority)
+            {
+                *current_id = next.id;
+                tracing::info!(
+                    "已切换到凭据 #{}（优先级 {}）",
+                    next.id,
+                    next.credentials.priority
+                );
+                true
+            } else {
+                tracing::error!("所有凭据均已禁用！");
+                false
+            }
+        };
+        self.persist_entry_by_id_to_store(id);
+        self.persist_stats_or_store();
+        result
+    }
+
     /// 设置凭据临时不可调度冷却时间
     pub fn set_temp_unschedulable(&self, id: u64, until: chrono::DateTime<Utc>, reason: String) {
         let mut entries = self.entries.lock();
@@ -1877,6 +1932,7 @@ impl MultiTokenManager {
                             DisabledReason::TooManyRefreshFailures => "TooManyRefreshFailures",
                             DisabledReason::QuotaExceeded => "QuotaExceeded",
                             DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
+                            DisabledReason::AccountBanned => "AccountBanned",
                             DisabledReason::InvalidConfig => "InvalidConfig",
                         }
                         .to_string()
@@ -3113,6 +3169,18 @@ mod tests {
     }
 
     #[test]
+    fn test_disabled_reason_account_banned_roundtrip() {
+        assert_eq!(
+            disabled_reason_label(DisabledReason::AccountBanned),
+            "AccountBanned"
+        );
+        assert_eq!(
+            disabled_reason_from_label("AccountBanned"),
+            Some(DisabledReason::AccountBanned)
+        );
+    }
+
+    #[test]
     fn test_multi_token_manager_report_failure() {
         let config = Config::default();
         let cred1 = KiroCredentials::default();
@@ -3385,6 +3453,77 @@ mod tests {
 
         // 再禁用第二个后，无可用凭据
         assert!(!manager.report_quota_exhausted(2));
+        assert_eq!(manager.available_count(), 0);
+    }
+
+    #[test]
+    fn test_multi_token_manager_report_account_banned() {
+        let config = Config::default();
+        let cred1 = KiroCredentials::default();
+        let cred2 = KiroCredentials::default();
+
+        let manager = MultiTokenManager::new(
+            config,
+            vec![cred1, cred2],
+            None,
+            None,
+            false,
+            test_registry(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(manager.available_count(), 2);
+        assert!(manager.report_account_banned(1));
+        assert_eq!(manager.available_count(), 1);
+
+        let snapshot = manager.snapshot();
+        let first = snapshot.entries.iter().find(|e| e.id == 1).unwrap();
+        assert!(first.disabled);
+        assert_eq!(first.disabled_reason.as_deref(), Some("AccountBanned"));
+        assert_eq!(first.failure_count, MAX_FAILURES_PER_CREDENTIAL);
+        assert_eq!(snapshot.current_id, 2);
+
+        assert!(!manager.report_account_banned(2));
+        assert_eq!(manager.available_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_multi_token_manager_account_banned_is_not_auto_recovered() {
+        let config = Config::default();
+        let mut cred1 = KiroCredentials::default();
+        cred1.access_token = Some("t1".to_string());
+        cred1.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+        let mut cred2 = KiroCredentials::default();
+        cred2.access_token = Some("t2".to_string());
+        cred2.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+
+        let manager = MultiTokenManager::new(
+            config,
+            vec![cred1, cred2],
+            None,
+            None,
+            false,
+            test_registry(),
+            None,
+        )
+        .unwrap();
+
+        manager.report_account_banned(1);
+        manager.report_account_banned(2);
+        assert_eq!(manager.available_count(), 0);
+
+        let err = manager
+            .acquire_context(None, None)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.contains("所有凭据均已禁用"),
+            "错误应提示所有凭据禁用，实际: {}",
+            err
+        );
         assert_eq!(manager.available_count(), 0);
     }
 

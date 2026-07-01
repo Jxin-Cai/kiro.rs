@@ -111,6 +111,8 @@ pub enum EndpointErrorKind {
     MonthlyQuotaExhausted,
     /// 401/403 + bearer token 失效标记：强制刷新 token（每凭据一次机会）
     BearerTokenInvalid,
+    /// 上游明确返回账号已封禁/停用等永久账号状态：立即禁用凭据 + 故障转移
+    AccountBanned,
     /// 401/403 无 bearer 失效标记：凭据/权限问题（如 IAM 拒绝、profile_arn
     /// 授权不足、订阅不匹配等）。计入 `report_failure`（累计达阈值禁用凭据），
     /// 然后故障转移到下一个可用凭据。与 `BearerTokenInvalid` 的区别：
@@ -158,6 +160,9 @@ pub trait KiroEndpoint: Send + Sync {
         }
         if matches!(status, 401 | 403) && default_is_bearer_token_invalid(body) {
             return EndpointErrorKind::BearerTokenInvalid;
+        }
+        if default_is_account_banned(status, body) {
+            return EndpointErrorKind::AccountBanned;
         }
         if matches!(status, 401 | 403) {
             return EndpointErrorKind::Unauthorized;
@@ -237,6 +242,35 @@ pub fn default_is_bearer_token_invalid(body: &str) -> bool {
     body.contains("The bearer token included in the request is invalid")
 }
 
+/// 默认的账号封禁/停用判断逻辑。
+///
+/// 只在明确账号级永久不可用短语出现时命中，避免把普通权限不足、未授权、
+/// 账单或限流问题误判为封禁。
+pub fn default_is_account_banned(status: u16, body: &str) -> bool {
+    if !matches!(status, 400 | 401 | 402 | 403) {
+        return false;
+    }
+
+    let body = body.to_lowercase();
+    const ACCOUNT_BANNED_MARKERS: &[&str] = &[
+        "account suspended",
+        "account has been suspended",
+        "account disabled",
+        "account has been disabled",
+        "account deactivated",
+        "account banned",
+        "account violation",
+        "organization disabled",
+        "organization has been disabled",
+        "workspace deactivated",
+        "deactivated workspace",
+    ];
+
+    ACCOUNT_BANNED_MARKERS
+        .iter()
+        .any(|marker| body.contains(marker))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +299,47 @@ mod tests {
             "The bearer token included in the request is invalid"
         ));
         assert!(!default_is_bearer_token_invalid("unrelated error"));
+    }
+
+    #[test]
+    fn test_default_account_banned_detects_explicit_markers() {
+        assert!(default_is_account_banned(
+            403,
+            r#"{"message":"Account has been suspended due to policy"}"#
+        ));
+        assert!(default_is_account_banned(
+            400,
+            r#"{"message":"Organization disabled"}"#
+        ));
+        assert!(default_is_account_banned(
+            402,
+            r#"{"detail":{"code":"deactivated_workspace"},"message":"Workspace deactivated"}"#
+        ));
+    }
+
+    #[test]
+    fn test_default_account_banned_is_case_insensitive() {
+        assert!(default_is_account_banned(
+            403,
+            "ACCOUNT BANNED for terms violation"
+        ));
+    }
+
+    #[test]
+    fn test_default_account_banned_ignores_broad_auth_words() {
+        assert!(!default_is_account_banned(
+            403,
+            "Access forbidden: user is not authorized and may lack permissions"
+        ));
+        assert!(!default_is_account_banned(
+            401,
+            "Unauthorized: permission denied"
+        ));
+        assert!(!default_is_account_banned(
+            402,
+            "Payment required: credit balance exhausted"
+        ));
+        assert!(!default_is_account_banned(429, "account suspended"));
     }
 
     /// 仅用于覆盖 trait 默认 `classify_error` 的探针端点
@@ -324,12 +399,64 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_error_transient_429_500() {
+    fn test_classify_error_account_banned() {
+        let probe = ProbeEndpoint;
+        assert_eq!(
+            probe.classify_error(403, r#"{"message":"account suspended"}"#),
+            EndpointErrorKind::AccountBanned
+        );
+        assert_eq!(
+            probe.classify_error(400, r#"{"message":"organization disabled"}"#),
+            EndpointErrorKind::AccountBanned
+        );
+        assert_eq!(
+            probe.classify_error(402, r#"{"message":"deactivated workspace"}"#),
+            EndpointErrorKind::AccountBanned
+        );
+    }
+
+    #[test]
+    fn test_classify_error_bearer_token_invalid_takes_precedence_over_account_banned() {
+        let probe = ProbeEndpoint;
+        let body = "The bearer token included in the request is invalid. account suspended";
+        assert_eq!(
+            probe.classify_error(403, body),
+            EndpointErrorKind::BearerTokenInvalid
+        );
+    }
+
+    #[test]
+    fn test_classify_error_broad_403_remains_unauthorized() {
+        let probe = ProbeEndpoint;
+        let body =
+            r#"{"message":"Access forbidden: user is not authorized and may lack permissions"}"#;
+        assert_eq!(
+            probe.classify_error(403, body),
+            EndpointErrorKind::Unauthorized
+        );
+    }
+
+    #[test]
+    fn test_classify_error_rate_limited() {
         let probe = ProbeEndpoint;
         assert_eq!(
             probe.classify_error(429, "{}"),
-            EndpointErrorKind::Transient
+            EndpointErrorKind::RateLimited
         );
+    }
+
+    #[test]
+    fn test_classify_error_overloaded() {
+        let probe = ProbeEndpoint;
+        assert_eq!(
+            probe.classify_error(529, "{}"),
+            EndpointErrorKind::Overloaded
+        );
+    }
+
+    #[test]
+    fn test_classify_error_transient_408_500() {
+        let probe = ProbeEndpoint;
         assert_eq!(
             probe.classify_error(408, "{}"),
             EndpointErrorKind::Transient

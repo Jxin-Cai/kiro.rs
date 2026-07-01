@@ -10,6 +10,7 @@ export type CredentialHealthKind =
   | 'too_many_refresh_failures'
   | 'quota_exceeded'
   | 'invalid_refresh_token'
+  | 'account_banned'
   | 'invalid_config'
 
 export type CredentialHealthTone =
@@ -93,6 +94,15 @@ export function getCredentialHealth(
           kind: 'quota_exceeded',
           label: '额度耗尽',
           description: '账号额度已耗尽，当前不会参与调度。',
+          tone: 'red',
+          isAvailable: false,
+          isProblem: true,
+        }
+      case 'AccountBanned':
+        return {
+          kind: 'account_banned',
+          label: '账号封禁',
+          description: '账号已被上游封禁或停用，当前不会参与调度。',
           tone: 'red',
           isAvailable: false,
           isProblem: true,
